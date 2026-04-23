@@ -299,6 +299,9 @@ def run_inference_on_samples(
     Esegue l'inferenza su tutti i sample, popolando `model_raw_output`.
     Modifica i sample in-place e restituisce la lista.
     """
+    import gc
+    import torch
+
     total = len(samples)
     errors = 0
     t0 = time.time()
@@ -311,6 +314,16 @@ def run_inference_on_samples(
             print(f"[runner] ✗ sample {sample.id}: {exc}")
             sample.model_raw_output = ""
             errors += 1
+            # Libera VRAM subito dopo un OOM o errore GPU
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+
+        # Cache clearing periodico per prevenire frammentazione
+        if (i + 1) % 20 == 0:
+            gc.collect()
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
 
         if (i + 1) % progress_every == 0 or (i + 1) == total:
             elapsed = time.time() - t0
