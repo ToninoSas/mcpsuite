@@ -1,2 +1,37 @@
-__pycache__
-outputs
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.egg-info/
+dist/
+build/
+venv/
+.env
+.venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# HuggingFace download cache (si ri-scarica)
+data/.cache/
+
+# Output generati dalla pipeline (si ri-generano)
+phase1/outputs/
+phase2/outputs/
+outputs/
+
+# Pesi del modello e checkpoint
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+*.gguf
+*.npy
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
