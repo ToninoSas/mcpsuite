@@ -1,0 +1,17 @@
+# ── Core ─────────────────────────────────────────────────────────────────────
+torch>=2.2.0
+transformers>=4.40.0
+accelerate>=0.27.0
+
+# ── Quantizzazione 4-bit (backend transformers) ───────────────────────────────
+bitsandbytes>=0.43.0
+
+# ── Download dataset da HuggingFace ──────────────────────────────────────────
+huggingface-hub>=0.22.0
+datasets>=2.18.0
+
+# ── Test ─────────────────────────────────────────────────────────────────────
+pytest>=8.0.0
+
+# ── Opzionale: backend llama-cpp (GGUF) ──────────────────────────────────────
+# llama-cpp-python>=0.2.70   # decommentare se si usa backend=llama_cpp
