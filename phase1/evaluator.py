@@ -55,23 +55,26 @@ def _extract_calls_from_output(raw: str) -> list[dict]:
     calls: list[dict] = []
 
     # ── 1. Qwen native <tool_call> tag ────────────────────────────────────────
-    tc_pattern = re.compile(
-        r"<tool_call>\s*(\{.*?\})\s*</tool_call>",
-        re.DOTALL,
-    )
-    for m in tc_pattern.finditer(raw):
-        try:
-            obj = json.loads(m.group(1))
-            name = obj.get("name") or obj.get("function", {}).get("name", "")
-            args = obj.get("arguments") or obj.get("parameters") or obj.get("args") or {}
-            if isinstance(args, str):
-                args = json.loads(args)
-            if name:
-                calls.append({"name": name, "arguments": args})
-        except Exception:
-            pass
-    if calls:
-        return calls
+    # Qwen3 emette multi-call senza </tool_call> per ogni call:
+    #   <tool_call>{json1}\n<tool_call>{json2}\n</tool_call>
+    # Strategia: split su qualsiasi tag aperto/chiuso, poi parsa ogni segmento.
+    if "<tool_call>" in raw:
+        for segment in re.split(r"</?tool_call>", raw):
+            segment = segment.strip()
+            if not segment:
+                continue
+            try:
+                obj = json.loads(segment)
+                name = obj.get("name") or obj.get("function", {}).get("name", "")
+                args = obj.get("arguments") or obj.get("parameters") or obj.get("args") or {}
+                if isinstance(args, str):
+                    args = json.loads(args)
+                if name:
+                    calls.append({"name": name, "arguments": args})
+            except Exception:
+                pass
+        if calls:
+            return calls
 
     # ── 2. JSON fenced block ──────────────────────────────────────────────────
     fence = re.search(r"```(?:json)?\s*\n([\s\S]*?)\n```", raw)
