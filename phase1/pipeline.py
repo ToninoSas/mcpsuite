@@ -27,7 +27,7 @@ from collections import Counter
 from pathlib import Path
 
 from loader    import load_all, BFCLSample, MULTI_TURN_CATEGORIES
-from sampler   import proportional_sample, split_train_val_test
+from sampler   import proportional_sample, split_train_val_test, DEFAULT_WEIGHTS
 from runner    import RunnerConfig, build_runner, run_inference_on_samples, run_inference_parallel
 from evaluator import evaluate, evaluate_multi_turn
 
@@ -64,6 +64,7 @@ def run_pipeline(
     seed: int = 42,
     skip_inference: bool = False,
     num_gpus: int = 1,
+    weights: dict[str, float] | None = None,
 ) -> None:
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -90,6 +91,7 @@ def run_pipeline(
     samples = proportional_sample(
         corpus,
         total=total_samples,
+        weights=weights,
         seed=seed,
         filter_fn=lambda s: len(s.ground_truth) > 0,
     )
@@ -231,6 +233,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--seed",            type=int, default=42)
     p.add_argument("--num_gpus",        type=int, default=1,
                    help="GPU da usare in data-parallel (default 1; usa 2 per dual-T4 Kaggle)")
+    p.add_argument("--no_multi_turn",   action="store_true",
+                   help="Azzera i pesi delle categorie multi-turn (test/debug veloce)")
+    p.add_argument("--weights",         type=str, default=None,
+                   help="Pesi per categoria in formato JSON, es: '{\"simple\":0.5,\"multiple\":0.5}'")
     p.add_argument("--skip_inference",  action="store_true",
                    help="Salta l'inferenza (utile per ri-valutare output già generati)")
     return p.parse_args()
@@ -238,6 +244,13 @@ def parse_args() -> argparse.Namespace:
 
 if __name__ == "__main__":
     args = parse_args()
+
+    # Costruisce il dizionario dei pesi
+    weights: dict[str, float] | None = None
+    if args.weights:
+        weights = json.loads(args.weights)
+    elif args.no_multi_turn:
+        weights = {**DEFAULT_WEIGHTS, **{cat: 0.0 for cat in MULTI_TURN_CATEGORIES}}
 
     runner_cfg = RunnerConfig(
         model_name_or_path=args.model,
@@ -253,4 +266,5 @@ if __name__ == "__main__":
         seed=args.seed,
         skip_inference=args.skip_inference,
         num_gpus=args.num_gpus,
+        weights=weights,
     )
