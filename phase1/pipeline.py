@@ -26,10 +26,10 @@ import sys
 from collections import Counter
 from pathlib import Path
 
-from loader   import load_all, BFCLSample
-from sampler  import proportional_sample, split_train_val_test
-from runner   import RunnerConfig, build_runner, run_inference_on_samples
-from evaluator import evaluate
+from loader    import load_all, BFCLSample, MULTI_TURN_CATEGORIES
+from sampler   import proportional_sample, split_train_val_test
+from runner    import RunnerConfig, build_runner, run_inference_on_samples
+from evaluator import evaluate, evaluate_multi_turn
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -113,17 +113,27 @@ def run_pipeline(
     htype_counts = Counter()
 
     for sample in samples:
-        if not sample.model_raw_output:
-            # Sample senza output (errore di inferenza) → allucinazione di default
+        is_multi = sample.category in MULTI_TURN_CATEGORIES
+        raw = sample.model_raw_output
+
+        if not raw:
             from evaluator import EvalResult
             result = EvalResult(
                 label=1,
                 hallucination_type="INFERENCE_ERROR",
                 details={"error": "empty output"},
             )
+        elif is_multi:
+            # raw è list[str] (uno per turno); ground_truth è list[list[str]]
+            turn_outputs = raw if isinstance(raw, list) else [raw]
+            result = evaluate_multi_turn(
+                turn_outputs=turn_outputs,
+                per_turn_gt=sample.ground_truth,
+                category=sample.category,
+            )
         else:
             result = evaluate(
-                model_raw_output=sample.model_raw_output,
+                model_raw_output=raw,
                 ground_truth=sample.ground_truth,
                 category=sample.category,
             )
@@ -210,7 +220,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--data_dir",        default="./data",           help="Cartella BFCL")
     p.add_argument("--output",          default="./outputs/labeled_dataset.jsonl")
     p.add_argument("--total",           type=int, default=2000,     help="Sample totali")
-    p.add_argument("--model",           default="Qwen/Qwen2.5-7B-Instruct")
+    p.add_argument("--model",           default="Qwen/Qwen3.5-9B")
     p.add_argument("--backend",         default="transformers",     choices=["transformers", "llama_cpp"])
     p.add_argument("--max_new_tokens",  type=int, default=512)
     p.add_argument("--seed",            type=int, default=42)

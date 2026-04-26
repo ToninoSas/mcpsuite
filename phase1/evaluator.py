@@ -8,13 +8,18 @@ Strategia:
 
 Tassonomia delle allucinazioni (label=1):
   • INVALID_FORMAT      output non parseable come function call
-  • WRONG_FUNCTION      nome funzione sbagliato
+  • WRONG_FUNCTION      nome funzione sbagliato (o call fatta quando GT vuoto)
   • WRONG_ARG_NAMES     parametri con nomi diversi dal GT
   • WRONG_ARG_VALUES    parametri giusti ma valori fuori dal set ammesso
   • MISSING_ARGS        argomenti required mancanti
   • EXTRA_ARGS          argomenti extra non previsti
   • WRONG_CALL_COUNT    numero di chiamate diverso (parallel / multi-turn)
   • NO_CALL_MADE        il modello non ha prodotto nessuna chiamata
+
+Funzioni pubbliche:
+  evaluate()             → singolo turno, single/parallel/multiple categories
+  evaluate_turn()        → singolo turno multi-turn (supporta GT vuoto)
+  evaluate_multi_turn()  → tutti i turni di un sample multi-turn, aggrega i label
 """
 
 from __future__ import annotations
@@ -320,8 +325,15 @@ def _compare_single_call(
     result["name_match"] = True
 
     # 2. Controlla gli argomenti
-    pred_keys = set(pred_args.keys()) - {k for k in pred_args if k.startswith("__pos_")}
-    gt_keys   = set(gt_args_acceptable.keys())
+    gt_keys = set(gt_args_acceptable.keys())
+    # Se il GT usa argomenti posizionali (__pos_N) — tipico del formato exec —
+    # li confrontiamo direttamente. Altrimenti li escludiamo dai predicted
+    # per permettere matching leniente (positional vs keyword).
+    gt_has_positional = any(k.startswith("__pos_") for k in gt_keys)
+    if gt_has_positional:
+        pred_keys = set(pred_args.keys())
+    else:
+        pred_keys = set(pred_args.keys()) - {k for k in pred_args if k.startswith("__pos_")}
 
     # Argomenti mancanti (required: non sono nella lista con "" come valore accettabile)
     for k in gt_keys:
@@ -490,3 +502,145 @@ def evaluate(
         htype = "WRONG_ARG_NAMES"
 
     return EvalResult(label=1, hallucination_type=htype, details=details)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Multi-turn evaluation
+# ─────────────────────────────────────────────────────────────────────────────
+
+def evaluate_turn(
+    model_raw_output: str,
+    turn_gt: list[Any],
+    category: str,
+) -> EvalResult:
+    """
+    Valuta un singolo turno di una conversazione multi-turn.
+
+    turn_gt: lista di call exec-format attese per questo turno.
+             • Se vuota ([]):  il modello NON doveva fare nessuna call
+               (scenario miss_func / miss_param). Produrre una call = label=1.
+             • Se non vuota:  TUTTE le call elencate devono essere prodotte
+               simultaneamente (matching bipartito, come le categorie parallel).
+    """
+    details: dict[str, Any] = {
+        "category": category,
+        "raw_output_len": len(model_raw_output),
+    }
+
+    predicted_calls = _extract_calls_from_output(model_raw_output)
+    details["predicted_calls"] = predicted_calls
+    details["n_predicted"] = len(predicted_calls)
+    details["n_expected"] = len(turn_gt)
+
+    # ── GT vuoto: il modello NON doveva chiamare ──────────────────────────────
+    if not turn_gt:
+        if not predicted_calls:
+            return EvalResult(label=0, hallucination_type=None, details=details)
+        details["should_not_call"] = True
+        return EvalResult(
+            label=1,
+            hallucination_type="WRONG_FUNCTION",
+            details=details,
+        )
+
+    # ── Nessuna call prodotta ma era attesa ───────────────────────────────────
+    if not predicted_calls:
+        details["parse_error"] = True
+        return EvalResult(label=1, hallucination_type="NO_CALL_MADE", details=details)
+
+    # ── Numero di call sbagliato ──────────────────────────────────────────────
+    if len(predicted_calls) != len(turn_gt):
+        details["count_mismatch"] = {
+            "expected": len(turn_gt),
+            "predicted": len(predicted_calls),
+        }
+        return EvalResult(label=1, hallucination_type="WRONG_CALL_COUNT", details=details)
+
+    # ── Matching bipartito greedy ─────────────────────────────────────────────
+    gt_remaining = list(enumerate(turn_gt))
+    comparison_results = []
+
+    for pred_call in predicted_calls:
+        best_idx = -1
+        for idx, gt_entry in gt_remaining:
+            cmp = _compare_single_call(pred_call, gt_entry)
+            if cmp["is_correct"]:
+                best_idx = idx
+                comparison_results.append({"matched": True, **cmp})
+                break
+        if best_idx >= 0:
+            gt_remaining = [(i, e) for i, e in gt_remaining if i != best_idx]
+        else:
+            partials = [_compare_single_call(pred_call, e) for _, e in gt_remaining]
+            comparison_results.append({
+                "matched": False,
+                "partial": max(
+                    partials,
+                    key=lambda x: sum([x["name_match"], x["args_match"]]),
+                ) if partials else {},
+            })
+
+    details["comparisons"] = comparison_results
+    all_matched = all(r.get("matched", False) for r in comparison_results)
+
+    if all_matched:
+        return EvalResult(label=0, hallucination_type=None, details=details)
+
+    first_fail = next((r for r in comparison_results if not r.get("matched")), {})
+    partial = first_fail.get("partial", {}) or first_fail
+
+    if not partial.get("name_match", False):
+        htype = "WRONG_FUNCTION"
+    elif partial.get("missing_args"):
+        htype = "MISSING_ARGS"
+    elif partial.get("extra_args"):
+        htype = "EXTRA_ARGS"
+    elif partial.get("wrong_values"):
+        htype = "WRONG_ARG_VALUES"
+    else:
+        htype = "WRONG_ARG_NAMES"
+
+    return EvalResult(label=1, hallucination_type=htype, details=details)
+
+
+def evaluate_multi_turn(
+    turn_outputs: list[str],
+    per_turn_gt: list[list[Any]],
+    category: str,
+) -> EvalResult:
+    """
+    Valuta tutti i turni di un sample multi-turn e restituisce un EvalResult
+    aggregato.
+
+    turn_outputs:  output grezzo del modello, uno per turno
+    per_turn_gt:   GT annidato dal file possible_answer (list[list[str]])
+    category:      categoria BFCL del sample
+
+    Label aggregato: 1 se almeno un turno allucia, 0 altrimenti.
+    hallucination_type: primo tipo di allucinazione incontrato.
+    eval_details: include il breakdown per turno.
+    """
+    per_turn_results: list[EvalResult] = []
+    for output, turn_gt in zip(turn_outputs, per_turn_gt):
+        result = evaluate_turn(output, turn_gt, category)
+        per_turn_results.append(result)
+
+    any_halluc = any(r.label == 1 for r in per_turn_results)
+    first_htype = next(
+        (r.hallucination_type for r in per_turn_results if r.label == 1),
+        None,
+    )
+
+    details: dict[str, Any] = {
+        "category": category,
+        "n_turns": len(per_turn_results),
+        "per_turn_labels": [r.label for r in per_turn_results],
+        "per_turn_htypes": [r.hallucination_type for r in per_turn_results],
+        "per_turn_details": [r.details for r in per_turn_results],
+    }
+
+    return EvalResult(
+        label=1 if any_halluc else 0,
+        hallucination_type=first_htype,
+        details=details,
+    )

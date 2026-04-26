@@ -59,8 +59,9 @@ class BFCLSample:
     ground_truth: list[Any]             # lista di call accettabili
     # Campi presenti solo negli exec samples
     execution_result_type: list[str] = field(default_factory=list)
-    # Riempito dopo l'inferenza
-    model_raw_output: str | None = None
+    # Riempito dopo l'inferenza.
+    # Single-turn: str; multi-turn: list[str] (uno per turno)
+    model_raw_output: str | list[str] | None = None
     label: int | None = None            # 0=corretto, 1=allucinazione
     hallucination_type: str | None = None
 

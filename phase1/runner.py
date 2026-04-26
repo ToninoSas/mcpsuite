@@ -60,25 +60,27 @@ Respond ONLY with a valid tool call in the format:
 If no function is appropriate, reply with: NO_CALL"""
 
 
+def build_system_message(sample: BFCLSample) -> dict:
+    """Restituisce il solo messaggio di sistema con gli schemi delle funzioni."""
+    functions_json = json.dumps(sample.functions, indent=2, ensure_ascii=False)
+    return {
+        "role": "system",
+        "content": SYSTEM_TEMPLATE.format(functions_json=functions_json),
+    }
+
+
 def build_prompt(sample: BFCLSample) -> list[dict]:
     """
     Costruisce la lista di messaggi (format chat) per un BFCLSample.
 
     Per single-turn: system + un singolo user message.
-    Per multi-turn:  system + la sequenza di turni nel campo 'question'.
+    Per multi-turn:  concatena tutti i turni (usato solo per inferenza single-pass).
+                     Usa run_multi_turn_inference() per la valutazione corretta.
     """
-    functions_json = json.dumps(sample.functions, indent=2, ensure_ascii=False)
-    system_msg = {
-        "role": "system",
-        "content": SYSTEM_TEMPLATE.format(functions_json=functions_json),
-    }
+    messages = [build_system_message(sample)]
 
     # sample.question: list[list[dict]] — ogni inner list è un turno
-    # Per single-turn è [[{"role": "user", "content": "..."}]]
-    messages = [system_msg]
-
     for turn in sample.question:
-        # Ogni turno è una lista di messaggi (di solito uno solo)
         for msg in turn:
             messages.append({
                 "role": msg.get("role", "user"),
@@ -86,6 +88,36 @@ def build_prompt(sample: BFCLSample) -> list[dict]:
             })
 
     return messages
+
+
+def run_multi_turn_inference(
+    sample: BFCLSample,
+    runner: "TransformersRunner | LlamaCppRunner",
+) -> list[str]:
+    """
+    Esegue l'inferenza multi-turn chiamando il modello un turno alla volta,
+    accumulando il contesto (incluse le risposte precedenti del modello).
+
+    Returns:
+        Lista di output raw del modello, uno per turno.
+    """
+    messages: list[dict] = [build_system_message(sample)]
+    outputs: list[str] = []
+
+    for turn in sample.question:
+        for msg in turn:
+            messages.append({
+                "role": msg.get("role", "user"),
+                "content": msg.get("content", ""),
+            })
+
+        raw_output = runner.generate(messages)
+        outputs.append(raw_output)
+
+        # Aggiunge la risposta del modello al contesto per il turno successivo
+        messages.append({"role": "assistant", "content": raw_output})
+
+    return outputs
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -302,10 +334,16 @@ def run_inference_on_samples(
 ) -> list[BFCLSample]:
     """
     Esegue l'inferenza su tutti i sample, popolando `model_raw_output`.
+
+    Per i sample single-turn: model_raw_output è una stringa.
+    Per i sample multi-turn:  model_raw_output è una lista di stringhe
+                               (una per turno), eseguita con contesto accumulato.
+
     Modifica i sample in-place e restituisce la lista.
     """
     import gc
     import torch
+    from loader import MULTI_TURN_CATEGORIES
 
     total = len(samples)
     errors = 0
@@ -313,18 +351,19 @@ def run_inference_on_samples(
 
     for i, sample in enumerate(samples):
         try:
-            messages = build_prompt(sample)
-            sample.model_raw_output = runner.generate(messages)
+            if sample.category in MULTI_TURN_CATEGORIES:
+                sample.model_raw_output = run_multi_turn_inference(sample, runner)
+            else:
+                messages = build_prompt(sample)
+                sample.model_raw_output = runner.generate(messages)
         except Exception as exc:
             print(f"[runner] ✗ sample {sample.id}: {exc}")
-            sample.model_raw_output = ""
+            sample.model_raw_output = "" if sample.category not in MULTI_TURN_CATEGORIES else []
             errors += 1
-            # Libera VRAM subito dopo un OOM o errore GPU
             gc.collect()
             if torch.cuda.is_available():
                 torch.cuda.empty_cache()
 
-        # Cache clearing periodico per prevenire frammentazione
         if (i + 1) % 20 == 0:
             gc.collect()
             if torch.cuda.is_available():
