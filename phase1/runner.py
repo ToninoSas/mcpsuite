@@ -191,12 +191,17 @@ class TransformersRunner:
         import torch
 
         captured: dict[str, Any] = {}
+        _prefill_done = [False]  # list to allow mutation inside nested function
 
         def _hook(module, input, output):
-            # output del transformer block è tipicamente una tupla;
-            # il primo elemento è il residual stream [batch, seq, hidden]
+            # Capture only the prefill pass (first forward call).
+            # model.generate() fires this hook once per token; subsequent calls
+            # have seq_len=1 (decode step) and would overwrite the prefill state.
+            if _prefill_done[0]:
+                return
             hidden = output[0] if isinstance(output, tuple) else output
             captured["last_hidden"] = hidden.detach().cpu()
+            _prefill_done[0] = True
 
         # Registra l'hook sull'ultimo transformer block
         # Qwen2: model.model.layers[-1]

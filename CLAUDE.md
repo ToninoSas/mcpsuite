@@ -25,23 +25,19 @@ agent before the bad call is executed.
 |---|---|
 | Model | `Qwen/Qwen3.5-9B` |
 | Quantization | 4-bit NF4 (bitsandbytes double-quant) |
-| Hidden size | 3584 (qwen3.5-9B) |
-| Num layers | 28 |
+| Hidden size | 4096 (qwen3.5-9B) |
+| Num layers | 32 |
 | Hook target | `model.model.layers[-1]` (last transformer block) |
-| Pooling | Last-token hidden state → vector of dim 3584 |
-
-> The user originally said "qwen3.5-9b" but the actual HF model being used
-> is `Qwen/Qwen3.5-9B`. Confirm with the user if they meant a
-> different model variant before changing anything.
+| Pooling | Last-token hidden state → vector of dim 4096 (primary); mean of last 20 tokens (ablation) |
 
 ---
 
 ## Classifier architecture
 
 ```
-Input: last-layer hidden state, pooled → R^3584
+Input: last-layer hidden state, pooled → R^4096
   │
-  ├─ Linear(3584, 512)
+  ├─ Linear(4096, 512)
   ├─ BatchNorm1d(512)
   ├─ ReLU()
   ├─ Dropout(0.3)
@@ -163,7 +159,7 @@ See `docs/phase2_spec.md` for the full spec. Summary:
 1. Create `phase2/capture.py` — iterates over `labeled_dataset.jsonl`,
    calls `runner.TransformersRunner.generate_with_hidden_state()` for each
    sample, and saves:
-   - `outputs/activations/{split}/X.npy`  — shape `(N, 3584)` float16
+   - `outputs/activations/{split}/X.npy`  — shape `(N, 4096)` float16
    - `outputs/activations/{split}/y.npy`  — shape `(N,)` int8 labels
    - `outputs/activations/{split}/meta.jsonl` — id, category, hallucination_type
 

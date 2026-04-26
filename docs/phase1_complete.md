@@ -76,7 +76,7 @@ def generate_with_hidden_state(self, messages) -> tuple[str, torch.Tensor]:
 ```
 
 The hook fires during the *prefill* pass. The returned tensor has shape
-`[1, seq_len, 3584]` where `seq_len` is the length of the full input
+`[1, seq_len, 4096]` where `seq_len` is the length of the full input
 (system prompt + function schemas + user query).
 
 ### `pipeline.py`

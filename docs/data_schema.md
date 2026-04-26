@@ -177,7 +177,7 @@ Each line of every file:
 ```
 phase2/outputs/
   train/
-    X.npy          numpy array, float16, shape (N, 3584)
+    X.npy          numpy array, float16, shape (N, 4096)
     y.npy          numpy array, int8,    shape (N,)
     meta.jsonl     one JSON per row: {"id": "...", "category": "...", "hallucination_type": "..."}
     progress.json  {"processed_ids": ["simple_0", "simple_1", ...]}

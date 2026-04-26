@@ -3,7 +3,7 @@
 ## Overview
 
 The goal is to predict, *before* a tool call is emitted, whether a
-Qwen2.5-7B agent is about to hallucinate. The prediction signal comes from
+Qwen3.5-9B agent is about to hallucinate. The prediction signal comes from
 the model's own internal state — the residual stream of the final transformer
 block — not from post-hoc output analysis.
 
@@ -11,15 +11,15 @@ block — not from post-hoc output analysis.
 User query + function schemas
         │
         ▼
-  Qwen2.5-7B-4bit
+  Qwen3.5-9B-4bit
   [prefill phase]
         │
         ├──► forward hook on layers[-1]
         │         │
         │         ▼
-        │    hidden state [1, seq, 3584]
+        │    hidden state [1, seq, 4096]
         │         │
-        │    last-token pool → R^3584
+        │    last-token pool → R^4096
         │         │
         │    Binary Classifier
         │    (Linear→ReLU→Sigmoid)
@@ -82,7 +82,7 @@ Mean pooling is a secondary ablation.
 ```
 outputs/activations/
   train/
-    X.npy          shape (N_train, 3584)  dtype float16
+    X.npy          shape (N_train, 4096)  dtype float16
     y.npy          shape (N_train,)       dtype int8
     meta.jsonl     id, category, hallucination_type per row
   val/   (same)
@@ -106,7 +106,7 @@ has already "decided" what to generate by this point.
 **Architecture** (fixed, per user spec):
 ```python
 nn.Sequential(
-    nn.Linear(3584, 512),
+    nn.Linear(4096, 512),
     nn.BatchNorm1d(512),
     nn.ReLU(),
     nn.Dropout(0.3),
@@ -175,10 +175,10 @@ class HallucinationGuardrail:
 |---|---|---|
 | Evaluation | Deterministic AST | User requirement; avoids cost and non-determinism of LLM judge |
 | Hook layer | Last transformer block | Most context-integrated representation; closest to output |
-| Pooling | Last-token (ablate mean) | Last token is the "summary" token before generation |
+| Pooling | Last-token (primary); mean of last 20 tokens (ablation) | Last token is the "summary" token before generation |
 | Quantization | NF4 double-quant | Best quality/VRAM tradeoff; preserves hidden state fidelity |
 | Hallucination label | Binary (0/1) | Simple classifier target; fine-grained type stored for analysis |
-| Hidden dim input | 3584 (Qwen2.5-7B) | Fixed by model architecture |
+| Hidden dim input | 4096 (Qwen3.5-9B) | Fixed by model architecture |
 | Classifier width | 512 | User specification |
 | Activation | ReLU | User specification |
 | Output activation | Sigmoid | User specification; appropriate for binary BCE |
