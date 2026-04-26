@@ -28,7 +28,7 @@ from pathlib import Path
 
 from loader    import load_all, BFCLSample, MULTI_TURN_CATEGORIES
 from sampler   import proportional_sample, split_train_val_test
-from runner    import RunnerConfig, build_runner, run_inference_on_samples
+from runner    import RunnerConfig, build_runner, run_inference_on_samples, run_inference_parallel
 from evaluator import evaluate, evaluate_multi_turn
 
 
@@ -63,6 +63,7 @@ def run_pipeline(
     runner_config: RunnerConfig,
     seed: int = 42,
     skip_inference: bool = False,
+    num_gpus: int = 1,
 ) -> None:
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -98,8 +99,12 @@ def run_pipeline(
         print("\n" + "═" * 60)
         print("FASE 1.3 — Inferenza Qwen 4-bit")
         print("═" * 60)
-        runner = build_runner(runner_config)
-        samples = run_inference_on_samples(samples, runner)
+        if num_gpus > 1:
+            print(f"[pipeline] Modalità multi-GPU: {num_gpus} GPU in data-parallel")
+            samples = run_inference_parallel(samples, runner_config, num_gpus=num_gpus)
+        else:
+            runner = build_runner(runner_config)
+            samples = run_inference_on_samples(samples, runner)
     else:
         print("[pipeline] skip_inference=True — salto l'inferenza")
 
@@ -224,6 +229,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--backend",         default="transformers",     choices=["transformers", "llama_cpp"])
     p.add_argument("--max_new_tokens",  type=int, default=512)
     p.add_argument("--seed",            type=int, default=42)
+    p.add_argument("--num_gpus",        type=int, default=1,
+                   help="GPU da usare in data-parallel (default 1; usa 2 per dual-T4 Kaggle)")
     p.add_argument("--skip_inference",  action="store_true",
                    help="Salta l'inferenza (utile per ri-valutare output già generati)")
     return p.parse_args()
@@ -245,4 +252,5 @@ if __name__ == "__main__":
         runner_config=runner_cfg,
         seed=args.seed,
         skip_inference=args.skip_inference,
+        num_gpus=args.num_gpus,
     )

@@ -40,7 +40,9 @@ class RunnerConfig:
     do_sample: bool          = False
     # Batch
     batch_size: int          = 1                               # 1 = sequenziale, sicuro su GPU 24GB
-    device_map: str          = "auto"
+    # device_map: "auto" | {"": 0} | {"": 1} | ...
+    # Per multi-GPU usa run_inference_parallel() che passa {"": gpu_id} automaticamente.
+    device_map: str | dict   = "auto"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -381,3 +383,71 @@ def run_inference_on_samples(
             )
 
     return samples
+
+
+def run_inference_parallel(
+    samples: list[BFCLSample],
+    config: RunnerConfig,
+    num_gpus: int = 2,
+    progress_every: int = 50,
+) -> list[BFCLSample]:
+    """
+    Esegue l'inferenza usando data parallelism su più GPU.
+
+    Carica una copia del modello per ogni GPU, divide i sample equamente e
+    processa ogni metà in un thread separato. Il threading funziona perché
+    model.generate() rilascia il Python GIL durante le operazioni CUDA, quindi
+    le due GPU lavorano davvero in parallelo (~2x throughput).
+
+    Uso in pipeline o notebook:
+        samples = run_inference_parallel(samples, runner_cfg, num_gpus=2)
+
+    Args:
+        samples:        lista di BFCLSample da processare
+        config:         configurazione base (device_map viene ignorato)
+        num_gpus:       numero di GPU da usare (default 2)
+        progress_every: frequenza del log di progresso per worker
+    """
+    import dataclasses
+    import torch
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    available = torch.cuda.device_count()
+    if available < num_gpus:
+        print(f"[runner] ⚠  richieste {num_gpus} GPU ma ne sono disponibili {available} — uso {available}")
+        num_gpus = max(available, 1)
+
+    if num_gpus == 1:
+        runner = build_runner(config)
+        return run_inference_on_samples(samples, runner, progress_every)
+
+    # Divide i sample in chunk contigui (mantiene l'ordine)
+    chunk_size = len(samples) // num_gpus
+    chunks: list[list[BFCLSample]] = [
+        samples[i * chunk_size : (i + 1) * chunk_size]
+        for i in range(num_gpus - 1)
+    ]
+    chunks.append(samples[(num_gpus - 1) * chunk_size :])  # ultimo: eventuale resto
+
+    def _worker(gpu_id: int, chunk: list[BFCLSample]) -> list[BFCLSample]:
+        gpu_config = dataclasses.replace(config, device_map={"": gpu_id})
+        runner = TransformersRunner(gpu_config)
+        runner.load()
+        print(f"[runner] GPU {gpu_id} pronta — {len(chunk)} sample assegnati")
+        return run_inference_on_samples(chunk, runner, progress_every)
+
+    results: dict[int, list[BFCLSample]] = {}
+    with ThreadPoolExecutor(max_workers=num_gpus) as pool:
+        futures = {
+            pool.submit(_worker, gpu_id, chunk): gpu_id
+            for gpu_id, chunk in enumerate(chunks)
+        }
+        for future in as_completed(futures):
+            gpu_id = futures[future]
+            results[gpu_id] = future.result()
+
+    # Riassembla in ordine originale
+    ordered: list[BFCLSample] = []
+    for gpu_id in range(num_gpus):
+        ordered.extend(results[gpu_id])
+    return ordered
