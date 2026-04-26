@@ -28,6 +28,68 @@ from pathlib import Path
 from typing import Any
 
 
+# ── Mappatura classe → file func_doc ─────────────────────────────────────────
+# Le multi-turn non hanno il campo "function"; gli schemi vengono da
+# data/multi_turn_func_doc/{filename}.json (uno schema per riga, JSONL).
+# Il nome del file NON corrisponde sempre al nome della classe (es. TwitterAPI
+# è in posting_api.json, TravelAPI è in travel_booking.json).
+
+_CLASS_TO_FUNC_DOC: dict[str, str] = {
+    "GorillaFileSystem": "gorilla_file_system",
+    "MathAPI":           "math_api",
+    "MessageAPI":        "message_api",
+    "TwitterAPI":        "posting_api",
+    "TicketAPI":         "ticket_api",
+    "TradingBot":        "trading_bot",
+    "TravelAPI":         "travel_booking",
+    "VehicleControlAPI": "vehicle_control",
+}
+
+# Cache in-process per evitare di rileggere i file a ogni sample
+_FUNC_DOC_CACHE: dict[str, list[dict]] = {}
+
+
+def _load_func_doc_for_classes(
+    data_dir: Path,
+    class_names: list[str],
+) -> list[dict]:
+    """
+    Restituisce la lista concatenata degli schemi di funzione per le classi
+    indicate, leggendo i file JSONL in data/multi_turn_func_doc/.
+    """
+    func_doc_dir = data_dir / "multi_turn_func_doc"
+    schemas: list[dict] = []
+
+    for cls in class_names:
+        if cls in _FUNC_DOC_CACHE:
+            schemas.extend(_FUNC_DOC_CACHE[cls])
+            continue
+
+        fname = _CLASS_TO_FUNC_DOC.get(cls)
+        if fname is None:
+            print(f"[loader] ⚠  classe sconosciuta in func_doc: {cls}")
+            _FUNC_DOC_CACHE[cls] = []
+            continue
+
+        fpath = func_doc_dir / f"{fname}.json"
+        if not fpath.exists():
+            print(f"[loader] ⚠  func_doc non trovato: {fpath}")
+            _FUNC_DOC_CACHE[cls] = []
+            continue
+
+        class_schemas: list[dict] = []
+        with open(fpath, encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if line:
+                    class_schemas.append(json.loads(line))
+
+        _FUNC_DOC_CACHE[cls] = class_schemas
+        schemas.extend(class_schemas)
+
+    return schemas
+
+
 # ── Categorie supportate ─────────────────────────────────────────────────────
 
 SINGLE_TURN_CATEGORIES = [
@@ -145,11 +207,20 @@ def load_category(
             exec_result_type = []
             missing_gt += 1
 
+        # I record multi-turn non hanno il campo "function": gli schemi
+        # vengono caricati da multi_turn_func_doc/ tramite involved_classes.
+        if category in MULTI_TURN_CATEGORIES:
+            functions = _load_func_doc_for_classes(
+                data_dir, rec.get("involved_classes", [])
+            )
+        else:
+            functions = rec.get("function", [])
+
         samples.append(BFCLSample(
             id=rid,
             category=category,
             question=rec.get("question", []),
-            functions=rec.get("function", []),
+            functions=functions,
             ground_truth=gt,
             execution_result_type=exec_result_type,
         ))
