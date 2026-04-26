@@ -126,6 +126,9 @@ class BFCLSample:
     model_raw_output: str | list[str] | None = None
     label: int | None = None            # 0=corretto, 1=allucinazione
     hallucination_type: str | None = None
+    # Hidden state catturato durante l'inferenza (Phase 2).
+    # Shape (4096,) float16 numpy array; None se non catturato.
+    hidden_vec: Any = None
 
 
 # ── Funzioni di caricamento ───────────────────────────────────────────────────

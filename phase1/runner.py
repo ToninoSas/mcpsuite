@@ -95,25 +95,40 @@ def build_prompt(sample: BFCLSample) -> list[dict]:
 def run_multi_turn_inference(
     sample: BFCLSample,
     runner: "TransformersRunner | LlamaCppRunner",
+    capture_activations: bool = False,
 ) -> list[str]:
     """
     Esegue l'inferenza multi-turn chiamando il modello un turno alla volta,
     accumulando il contesto (incluse le risposte precedenti del modello).
+
+    Se capture_activations=True e il runner supporta generate_with_hidden_state(),
+    cattura l'hidden state dell'ultimo turno (contesto più ricco) e lo salva
+    in sample.hidden_vec come numpy array shape (4096,) float16.
 
     Returns:
         Lista di output raw del modello, uno per turno.
     """
     messages: list[dict] = [build_system_message(sample)]
     outputs: list[str] = []
+    n_turns = len(sample.question)
 
-    for turn in sample.question:
+    for turn_idx, turn in enumerate(sample.question):
         for msg in turn:
             messages.append({
                 "role": msg.get("role", "user"),
                 "content": msg.get("content", ""),
             })
 
-        raw_output = runner.generate(messages)
+        is_last = (turn_idx == n_turns - 1)
+        if capture_activations and is_last and hasattr(runner, "generate_with_hidden_state"):
+            import torch, numpy as np
+            raw_output, hidden = runner.generate_with_hidden_state(messages)
+            if hidden is not None:
+                # Pool: last token del prefill dell'ultimo turno
+                sample.hidden_vec = hidden[0, -1, :].to(torch.float16).numpy()
+        else:
+            raw_output = runner.generate(messages)
+
         outputs.append(raw_output)
 
         # Aggiunge la risposta del modello al contesto per il turno successivo
@@ -333,6 +348,7 @@ def run_inference_on_samples(
     samples: list[BFCLSample],
     runner: TransformersRunner | LlamaCppRunner,
     progress_every: int = 50,
+    capture_activations: bool = False,
 ) -> list[BFCLSample]:
     """
     Esegue l'inferenza su tutti i sample, popolando `model_raw_output`.
@@ -341,11 +357,20 @@ def run_inference_on_samples(
     Per i sample multi-turn:  model_raw_output è una lista di stringhe
                                (una per turno), eseguita con contesto accumulato.
 
+    Se capture_activations=True e il runner è TransformersRunner, popola anche
+    sample.hidden_vec con il vettore (4096,) float16 catturato durante il prefill.
+    Per i multi-turn viene catturato solo l'ultimo turno (contesto completo).
+
     Modifica i sample in-place e restituisce la lista.
     """
     import gc
     import torch
     from loader import MULTI_TURN_CATEGORIES
+
+    if capture_activations and not hasattr(runner, "generate_with_hidden_state"):
+        print("[runner] ⚠  capture_activations=True ma il runner non supporta "
+              "generate_with_hidden_state() — le activations non verranno catturate.")
+        capture_activations = False
 
     total = len(samples)
     errors = 0
@@ -354,10 +379,20 @@ def run_inference_on_samples(
     for i, sample in enumerate(samples):
         try:
             if sample.category in MULTI_TURN_CATEGORIES:
-                sample.model_raw_output = run_multi_turn_inference(sample, runner)
+                sample.model_raw_output = run_multi_turn_inference(
+                    sample, runner, capture_activations=capture_activations
+                )
             else:
                 messages = build_prompt(sample)
-                sample.model_raw_output = runner.generate(messages)
+                if capture_activations:
+                    import numpy as np
+                    raw_output, hidden = runner.generate_with_hidden_state(messages)
+                    sample.model_raw_output = raw_output
+                    if hidden is not None:
+                        # Pool: last token del prefill → vettore (4096,) float16
+                        sample.hidden_vec = hidden[0, -1, :].to(torch.float16).numpy()
+                else:
+                    sample.model_raw_output = runner.generate(messages)
         except Exception as exc:
             print(f"[runner] ✗ sample {sample.id}: {exc}")
             sample.model_raw_output = "" if sample.category not in MULTI_TURN_CATEGORIES else []
@@ -390,6 +425,7 @@ def run_inference_parallel(
     config: RunnerConfig,
     num_gpus: int = 2,
     progress_every: int = 50,
+    capture_activations: bool = False,
 ) -> list[BFCLSample]:
     """
     Esegue l'inferenza usando data parallelism su più GPU.
@@ -403,10 +439,11 @@ def run_inference_parallel(
         samples = run_inference_parallel(samples, runner_cfg, num_gpus=2)
 
     Args:
-        samples:        lista di BFCLSample da processare
-        config:         configurazione base (device_map viene ignorato)
-        num_gpus:       numero di GPU da usare (default 2)
-        progress_every: frequenza del log di progresso per worker
+        samples:             lista di BFCLSample da processare
+        config:              configurazione base (device_map viene ignorato)
+        num_gpus:            numero di GPU da usare (default 2)
+        progress_every:      frequenza del log di progresso per worker
+        capture_activations: se True, cattura hidden_vec per ogni sample
     """
     import dataclasses
     import torch
@@ -419,7 +456,7 @@ def run_inference_parallel(
 
     if num_gpus == 1:
         runner = build_runner(config)
-        return run_inference_on_samples(samples, runner, progress_every)
+        return run_inference_on_samples(samples, runner, progress_every, capture_activations)
 
     # Divide i sample in chunk contigui (mantiene l'ordine)
     chunk_size = len(samples) // num_gpus
@@ -434,7 +471,7 @@ def run_inference_parallel(
         runner = TransformersRunner(gpu_config)
         runner.load()
         print(f"[runner] GPU {gpu_id} pronta — {len(chunk)} sample assegnati")
-        return run_inference_on_samples(chunk, runner, progress_every)
+        return run_inference_on_samples(chunk, runner, progress_every, capture_activations)
 
     results: dict[int, list[BFCLSample]] = {}
     with ThreadPoolExecutor(max_workers=num_gpus) as pool:

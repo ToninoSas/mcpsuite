@@ -65,6 +65,7 @@ def run_pipeline(
     skip_inference: bool = False,
     num_gpus: int = 1,
     weights: dict[str, float] | None = None,
+    capture_activations: bool = False,
 ) -> None:
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -101,12 +102,19 @@ def run_pipeline(
         print("\n" + "═" * 60)
         print("FASE 1.3 — Inferenza Qwen 4-bit")
         print("═" * 60)
+        if capture_activations:
+            print("[pipeline] capture_activations=True — hidden state catturato durante l'inferenza")
         if num_gpus > 1:
             print(f"[pipeline] Modalità multi-GPU: {num_gpus} GPU in data-parallel")
-            samples = run_inference_parallel(samples, runner_config, num_gpus=num_gpus)
+            samples = run_inference_parallel(
+                samples, runner_config, num_gpus=num_gpus,
+                capture_activations=capture_activations,
+            )
         else:
             runner = build_runner(runner_config)
-            samples = run_inference_on_samples(samples, runner)
+            samples = run_inference_on_samples(
+                samples, runner, capture_activations=capture_activations
+            )
     else:
         print("[pipeline] skip_inference=True — salto l'inferenza")
 
@@ -193,6 +201,58 @@ def run_pipeline(
                 if rec["id"] in ids:
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
+    # ── 6. Salvataggio activations (se richiesto) ────────────────────────────
+    if capture_activations and not skip_inference:
+        import numpy as np
+
+        print("\n" + "═" * 60)
+        print("FASE 1.6 — Salvataggio activations")
+        print("═" * 60)
+
+        # Lookup: id → sample originale (con hidden_vec) e id → record labellato
+        sample_by_id  = {s.id: s for s in samples}
+        labeled_by_id = {r["id"]: r for r in labeled}
+
+        acts_base = out.parent / "activations"
+        for split_name, split_data in [
+            ("train", train_set),
+            ("val",   val_set),
+            ("test",  test_set),
+        ]:
+            split_dir = acts_base / split_name
+            split_dir.mkdir(parents=True, exist_ok=True)
+
+            X, y, meta = [], [], []
+            missing = 0
+
+            for s in split_data:
+                orig = sample_by_id.get(s.id)
+                vec  = getattr(orig, "hidden_vec", None) if orig else None
+                if vec is None:
+                    missing += 1
+                    continue
+                rec = labeled_by_id[s.id]
+                X.append(vec)
+                y.append(rec["label"])
+                meta.append({
+                    "id":                 rec["id"],
+                    "category":           rec["category"],
+                    "hallucination_type": rec["hallucination_type"],
+                })
+
+            if missing:
+                print(f"[pipeline] ⚠  {missing} sample senza hidden_vec in '{split_name}'")
+
+            if X:
+                np.save(split_dir / "X.npy", np.stack(X).astype(np.float16))
+                np.save(split_dir / "y.npy", np.array(y, dtype=np.int8))
+                with open(split_dir / "meta.jsonl", "w", encoding="utf-8") as f:
+                    for m in meta:
+                        f.write(json.dumps(m, ensure_ascii=False) + "\n")
+                print(f"[pipeline]   {split_name}: {len(X)} vettori → {split_dir}/")
+            else:
+                print(f"[pipeline] ⚠  nessuna activation salvata per '{split_name}'")
+
     # ── Report finale ─────────────────────────────────────────────────────────
     total_labeled = len(labeled)
     n_correct   = label_counts[0]
@@ -239,6 +299,8 @@ def parse_args() -> argparse.Namespace:
                    help="Pesi per categoria in formato JSON, es: '{\"simple\":0.5,\"multiple\":0.5}'")
     p.add_argument("--skip_inference",  action="store_true",
                    help="Salta l'inferenza (utile per ri-valutare output già generati)")
+    p.add_argument("--capture_activations", action="store_true",
+                   help="Cattura hidden state durante l'inferenza e salva X.npy/y.npy/meta.jsonl in outputs/activations/")
     return p.parse_args()
 
 
@@ -267,4 +329,5 @@ if __name__ == "__main__":
         skip_inference=args.skip_inference,
         num_gpus=args.num_gpus,
         weights=weights,
+        capture_activations=args.capture_activations,
     )
