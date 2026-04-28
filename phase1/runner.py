@@ -38,6 +38,13 @@ class RunnerConfig:
     max_new_tokens: int      = 512
     temperature: float       = 0.0                             # greedy per riproducibilità
     do_sample: bool          = False
+    # Troncamento input — fondamentale per sequenze multi-turn molto lunghe.
+    # None = nessun limite; 3072 è sicuro su T4 16GB con NF4.
+    max_seq_len: int | None  = None
+    # Implementazione attenzione — "sdpa" usa PyTorch SDPA (più efficiente in
+    # memoria per sequenze lunghe, senza dipendenze extra). "flash_attention_2"
+    # richiede il pacchetto flash-attn. None lascia scegliere a transformers.
+    attn_implementation: str | None = "sdpa"
     # Batch
     batch_size: int          = 1                               # 1 = sequenziale, sicuro su GPU 24GB
     # device_map: "auto" | {"": 0} | {"": 1} | ...
@@ -173,12 +180,24 @@ class TransformersRunner:
             trust_remote_code=True,
         )
 
-        self.model = AutoModelForCausalLM.from_pretrained(
-            cfg.model_name_or_path,
+        load_kwargs: dict = dict(
             quantization_config=bnb_config,
             device_map=cfg.device_map,
             trust_remote_code=True,
         )
+        if cfg.attn_implementation:
+            load_kwargs["attn_implementation"] = cfg.attn_implementation
+
+        try:
+            self.model = AutoModelForCausalLM.from_pretrained(
+                cfg.model_name_or_path, **load_kwargs
+            )
+        except Exception:
+            # sdpa o flash_attention_2 non supportati da questo modello: riprova senza
+            load_kwargs.pop("attn_implementation", None)
+            self.model = AutoModelForCausalLM.from_pretrained(
+                cfg.model_name_or_path, **load_kwargs
+            )
         self.model.eval()
         self._loaded = True
         print("[runner] Modello caricato ✓")
@@ -207,6 +226,11 @@ class TransformersRunner:
                 add_generation_prompt=True,
             )
         inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
+
+        # Tronca a sinistra se la sequenza supera max_seq_len.
+        # Mantiene i token più recenti (fine della conversazione).
+        if self.config.max_seq_len and inputs["input_ids"].shape[1] > self.config.max_seq_len:
+            inputs = {k: v[:, -self.config.max_seq_len:] for k, v in inputs.items()}
 
         cfg = self.config
         with torch.no_grad():
@@ -271,6 +295,9 @@ class TransformersRunner:
                 add_generation_prompt=True,
             )
         inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
+
+        if self.config.max_seq_len and inputs["input_ids"].shape[1] > self.config.max_seq_len:
+            inputs = {k: v[:, -self.config.max_seq_len:] for k, v in inputs.items()}
 
         with torch.no_grad():
             output_ids = self.model.generate(
@@ -393,6 +420,21 @@ def run_inference_on_samples(
                         sample.hidden_vec = hidden[0, -1, :].to(torch.float16).numpy()
                 else:
                     sample.model_raw_output = runner.generate(messages)
+        except torch.cuda.OutOfMemoryError as exc:
+            # Dopo OOM il contesto CUDA può essere parzialmente corrotto.
+            # synchronize() attende che tutti i kernel pendenti finiscano
+            # prima di liberare la memoria, prevenendo il cascading
+            # "illegal memory access" sui sample successivi.
+            print(f"[runner] ✗ OOM {sample.id} (seq troppo lunga?) — pulisco e continuo")
+            sample.model_raw_output = "" if sample.category not in MULTI_TURN_CATEGORIES else []
+            errors += 1
+            gc.collect()
+            if torch.cuda.is_available():
+                try:
+                    torch.cuda.synchronize()
+                except Exception:
+                    pass
+                torch.cuda.empty_cache()
         except Exception as exc:
             print(f"[runner] ✗ sample {sample.id}: {exc}")
             sample.model_raw_output = "" if sample.category not in MULTI_TURN_CATEGORIES else []

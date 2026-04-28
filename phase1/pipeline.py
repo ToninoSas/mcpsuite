@@ -395,6 +395,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--model",           default="Qwen/Qwen3.5-9B")
     p.add_argument("--backend",         default="transformers",     choices=["transformers", "llama_cpp"])
     p.add_argument("--max_new_tokens",  type=int, default=512)
+    p.add_argument("--max_seq_len",     type=int, default=None,
+                   help="Tronca l'input a N token (mantiene gli ultimi N). "
+                        "Usare 3072 su T4 16 GB per evitare OOM sui multi-turn.")
     p.add_argument("--seed",            type=int, default=42)
     p.add_argument("--num_gpus",        type=int, default=1,
                    help="GPU da usare in data-parallel (default 1; usa 2 per dual-T4 Kaggle)")
@@ -423,6 +426,7 @@ if __name__ == "__main__":
         model_name_or_path=args.model,
         backend=args.backend,
         max_new_tokens=args.max_new_tokens,
+        max_seq_len=args.max_seq_len,
     )
 
     run_pipeline(
