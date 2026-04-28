@@ -23,6 +23,7 @@ import argparse
 import dataclasses
 import json
 import sys
+import time
 from collections import Counter
 from pathlib import Path
 
@@ -70,11 +71,16 @@ def run_pipeline(
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
+    t_pipeline_start = time.time()
+    timings: dict[str, float] = {}
+
     # ── 1. Caricamento ────────────────────────────────────────────────────────
     print("\n" + "═" * 60)
     print("FASE 1.1 — Caricamento corpus BFCL")
     print("═" * 60)
+    t0 = time.time()
     corpus = load_all(data_dir)
+    timings["load"] = time.time() - t0
 
     if not corpus:
         print("[pipeline] ERRORE: nessun file trovato in", data_dir)
@@ -89,6 +95,7 @@ def run_pipeline(
     print("═" * 60)
 
     # Esclude sample senza ground truth
+    t0 = time.time()
     samples = proportional_sample(
         corpus,
         total=total_samples,
@@ -96,8 +103,10 @@ def run_pipeline(
         seed=seed,
         filter_fn=lambda s: len(s.ground_truth) > 0,
     )
+    timings["sample"] = time.time() - t0
 
     # ── 3. Inferenza ──────────────────────────────────────────────────────────
+    t0 = time.time()
     if not skip_inference:
         print("\n" + "═" * 60)
         print("FASE 1.3 — Inferenza Qwen 4-bit")
@@ -117,15 +126,18 @@ def run_pipeline(
             )
     else:
         print("[pipeline] skip_inference=True — salto l'inferenza")
+    timings["inference"] = time.time() - t0
 
     # ── 4. Valutazione ────────────────────────────────────────────────────────
     print("\n" + "═" * 60)
     print("FASE 1.4 — Valutazione deterministica")
     print("═" * 60)
 
+    t0 = time.time()
     labeled: list[dict] = []
     label_counts = Counter()
     htype_counts = Counter()
+    cat_stats: dict[str, dict] = {}
 
     for sample in samples:
         is_multi = sample.category in MULTI_TURN_CATEGORIES
@@ -157,13 +169,28 @@ def run_pipeline(
         if result.hallucination_type:
             htype_counts[result.hallucination_type] += 1
 
+        # Statistiche per categoria
+        cat = sample.category
+        if cat not in cat_stats:
+            cat_stats[cat] = {"n": 0, "n_correct": 0, "n_halluc": 0, "htypes": Counter()}
+        cat_stats[cat]["n"] += 1
+        if result.label == 0:
+            cat_stats[cat]["n_correct"] += 1
+        else:
+            cat_stats[cat]["n_halluc"] += 1
+            if result.hallucination_type:
+                cat_stats[cat]["htypes"][result.hallucination_type] += 1
+
         labeled.append(sample_to_dict(sample, result))
+
+    timings["eval"] = time.time() - t0
 
     # ── 5. Salvataggio ────────────────────────────────────────────────────────
     print("\n" + "═" * 60)
     print("FASE 1.5 — Salvataggio dataset")
     print("═" * 60)
 
+    t0 = time.time()
     # Dataset completo
     with open(out, "w", encoding="utf-8") as f:
         for record in labeled:
@@ -201,7 +228,10 @@ def run_pipeline(
                 if rec["id"] in ids:
                     f.write(json.dumps(rec, ensure_ascii=False) + "\n")
 
+    timings["save"] = time.time() - t0
+
     # ── 6. Salvataggio activations (se richiesto) ────────────────────────────
+    t0 = time.time()
     if capture_activations and not skip_inference:
         import numpy as np
 
@@ -252,30 +282,105 @@ def run_pipeline(
                 print(f"[pipeline]   {split_name}: {len(X)} vettori → {split_dir}/")
             else:
                 print(f"[pipeline] ⚠  nessuna activation salvata per '{split_name}'")
+    timings["activations"] = time.time() - t0
 
     # ── Report finale ─────────────────────────────────────────────────────────
-    total_labeled = len(labeled)
-    n_correct   = label_counts[0]
-    n_halluc    = label_counts[1]
-    balance     = n_halluc / total_labeled * 100 if total_labeled else 0
+    timings["total"] = time.time() - t_pipeline_start
 
-    print(f"\n{'─' * 60}")
-    print(f"  Totale sample labellati : {total_labeled}")
-    print(f"  Corretti   (label=0)    : {n_correct}  ({100-balance:.1f}%)")
-    print(f"  Allucinati (label=1)    : {n_halluc}   ({balance:.1f}%)")
-    print(f"\n  Distribuzione tipi allucinazione:")
-    for htype, count in sorted(htype_counts.items(), key=lambda x: -x[1]):
-        print(f"    {htype:<25} {count:>5}  ({count/n_halluc*100:.1f}%)" if n_halluc else "")
-    print(f"\n  Dataset salvato in : {out}")
-    print(f"  Split train/val/test: {splits_dir}/")
-    print(f"{'─' * 60}\n")
+    total_labeled = len(labeled)
+    n_correct     = label_counts[0]
+    n_halluc      = label_counts[1]
+    accuracy      = n_correct / total_labeled if total_labeled else 0.0
+    halluc_rate   = n_halluc  / total_labeled if total_labeled else 0.0
+
+    W = 62
+    print(f"\n{'═' * W}")
+    print(f"  RISULTATI — {total_labeled} sample")
+    print(f"{'═' * W}")
+    print(f"  Accuracy  (corretti/totale)  : {accuracy*100:>6.1f}%  ({n_correct}/{total_labeled})")
+    print(f"  Hallucination rate           : {halluc_rate*100:>6.1f}%  ({n_halluc}/{total_labeled})")
+
+    if n_halluc:
+        print(f"\n  Distribuzione tipi allucinazione:")
+        for htype, count in sorted(htype_counts.items(), key=lambda x: -x[1]):
+            print(f"    {htype:<25} {count:>5}  ({count/n_halluc*100:.1f}%)")
+
+    print(f"\n  Breakdown per categoria:")
+    print(f"  {'categoria':<30} {'N':>5}  {'acc':>7}  {'hall%':>6}  top halluc. type")
+    print(f"  {'─'*30} {'─'*5}  {'─'*7}  {'─'*6}  {'─'*20}")
+    for cat, st in sorted(cat_stats.items()):
+        acc_cat   = st["n_correct"] / st["n"] if st["n"] else 0
+        hall_cat  = st["n_halluc"]  / st["n"] if st["n"] else 0
+        top_htype = max(st["htypes"], key=st["htypes"].get) if st["htypes"] else "—"
+        print(f"  {cat:<30} {st['n']:>5}  {acc_cat*100:>6.1f}%  {hall_cat*100:>5.1f}%  {top_htype}")
+
+    print(f"\n  Tempi di esecuzione:")
+    phase_labels = [
+        ("load",        "caricamento"),
+        ("sample",      "campionamento"),
+        ("inference",   "inferenza"),
+        ("eval",        "valutazione"),
+        ("save",        "salvataggio"),
+        ("activations", "activations"),
+    ]
+    for key, label in phase_labels:
+        t_sec = timings.get(key, 0.0)
+        if key == "inference" and not skip_inference and t_sec > 0:
+            tput = f"  ({len(samples)/t_sec:.2f} sample/s)"
+        else:
+            tput = ""
+        print(f"    {label:<16}: {t_sec:>8.1f}s{tput}")
+    t_tot = timings["total"]
+    print(f"    {'─'*36}")
+    print(f"    {'totale':<16}: {t_tot:>8.1f}s  ({t_tot/60:.1f} min)")
+
+    print(f"\n  Output:")
+    print(f"    dataset  : {out}")
+    print(f"    splits   : {splits_dir}/")
+    print(f"{'═' * W}\n")
 
     # Avviso sbilanciamento
-    if balance < 20 or balance > 80:
+    if halluc_rate < 0.20 or halluc_rate > 0.80:
         print(
-            f"[pipeline] ⚠  Dataset sbilanciato ({balance:.0f}% allucinazioni). "
+            f"[pipeline] ⚠  Dataset sbilanciato ({halluc_rate*100:.0f}% allucinazioni). "
             "Considera class_weight o oversampling nel training."
         )
+
+    # ── Salvataggio metrics.json ──────────────────────────────────────────────
+    metrics = {
+        "total":             total_labeled,
+        "n_correct":         n_correct,
+        "n_halluc":          n_halluc,
+        "accuracy":          round(accuracy,    4),
+        "hallucination_rate": round(halluc_rate, 4),
+        "hallucination_types": dict(htype_counts),
+        "per_category": {
+            cat: {
+                "n":                st["n"],
+                "n_correct":        st["n_correct"],
+                "n_halluc":         st["n_halluc"],
+                "accuracy":         round(st["n_correct"] / st["n"], 4) if st["n"] else 0,
+                "hallucination_rate": round(st["n_halluc"] / st["n"], 4) if st["n"] else 0,
+                "hallucination_types": dict(st["htypes"]),
+            }
+            for cat, st in cat_stats.items()
+        },
+        "splits": {
+            "train": len(train_set),
+            "val":   len(val_set),
+            "test":  len(test_set),
+        },
+        "timings_sec": {k: round(v, 2) for k, v in timings.items()},
+        "inference_samples_per_sec": (
+            round(len(samples) / timings["inference"], 3)
+            if not skip_inference and timings.get("inference", 0) > 0
+            else None
+        ),
+    }
+    metrics_path = out.parent / "metrics.json"
+    with open(metrics_path, "w", encoding="utf-8") as f:
+        json.dump(metrics, f, indent=2, ensure_ascii=False)
+    print(f"[pipeline] Metriche salvate in: {metrics_path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
