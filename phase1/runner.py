@@ -466,18 +466,26 @@ def run_inference_parallel(
     ]
     chunks.append(samples[(num_gpus - 1) * chunk_size :])  # ultimo: eventuale resto
 
-    def _worker(gpu_id: int, chunk: list[BFCLSample]) -> list[BFCLSample]:
+    # Caricamento sequenziale: from_pretrained + bitsandbytes non sono thread-safe.
+    # Caricare i due modelli in sequenza evita race condition sull'inizializzazione
+    # del contesto CUDA; l'inferenza vera e propria parte in parallelo dopo.
+    runners: list[TransformersRunner] = []
+    for gpu_id in range(num_gpus):
         gpu_config = dataclasses.replace(config, device_map={"": gpu_id})
-        runner = TransformersRunner(gpu_config)
-        runner.load()
-        print(f"[runner] GPU {gpu_id} pronta — {len(chunk)} sample assegnati")
+        r = TransformersRunner(gpu_config)
+        r.load()
+        torch.cuda.synchronize(gpu_id)
+        print(f"[runner] GPU {gpu_id} pronta — {len(chunks[gpu_id])} sample assegnati")
+        runners.append(r)
+
+    def _worker(runner: TransformersRunner, chunk: list[BFCLSample]) -> list[BFCLSample]:
         return run_inference_on_samples(chunk, runner, progress_every, capture_activations)
 
     results: dict[int, list[BFCLSample]] = {}
     with ThreadPoolExecutor(max_workers=num_gpus) as pool:
         futures = {
-            pool.submit(_worker, gpu_id, chunk): gpu_id
-            for gpu_id, chunk in enumerate(chunks)
+            pool.submit(_worker, runners[gpu_id], chunks[gpu_id]): gpu_id
+            for gpu_id in range(num_gpus)
         }
         for future in as_completed(futures):
             gpu_id = futures[future]
