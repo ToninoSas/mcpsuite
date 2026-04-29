@@ -274,12 +274,23 @@ def run_pipeline(
                 print(f"[pipeline] ⚠  {missing} sample senza hidden_vec in '{split_name}'")
 
             if X:
-                np.save(split_dir / "X.npy", np.stack(X).astype(np.float16))
+                X_arr = np.stack(X).astype(np.float16)  # (N, num_layers, hidden_size)
+                np.save(split_dir / "X.npy", X_arr)
                 np.save(split_dir / "y.npy", np.array(y, dtype=np.int8))
                 with open(split_dir / "meta.jsonl", "w", encoding="utf-8") as f:
                     for m in meta:
                         f.write(json.dumps(m, ensure_ascii=False) + "\n")
-                print(f"[pipeline]   {split_name}: {len(X)} vettori → {split_dir}/")
+                shape_info = {
+                    "X_shape":     list(X_arr.shape),
+                    "X_dtype":     "float16",
+                    "y_dtype":     "int8",
+                    "num_layers":  X_arr.shape[1],
+                    "hidden_size": X_arr.shape[2],
+                    "n_samples":   X_arr.shape[0],
+                }
+                with open(split_dir / "shape.json", "w") as f:
+                    json.dump(shape_info, f, indent=2)
+                print(f"[pipeline]   {split_name}: {len(X)} sample × {X_arr.shape[1]} layer × {X_arr.shape[2]} dim → {split_dir}/")
             else:
                 print(f"[pipeline] ⚠  nessuna activation salvata per '{split_name}'")
     timings["activations"] = time.time() - t0

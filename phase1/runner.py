@@ -128,11 +128,10 @@ def run_multi_turn_inference(
 
         is_last = (turn_idx == n_turns - 1)
         if capture_activations and is_last and hasattr(runner, "generate_with_hidden_state"):
-            import torch, numpy as np
-            raw_output, hidden = runner.generate_with_hidden_state(messages)
-            if hidden is not None:
-                # Pool: last token del prefill dell'ultimo turno
-                sample.hidden_vec = hidden[0, -1, :].to(torch.float16).numpy()
+            raw_output, activations = runner.generate_with_hidden_state(messages)
+            if activations is not None:
+                # shape: (num_layers, hidden_size) float16
+                sample.hidden_vec = activations
         else:
             raw_output = runner.generate(messages)
 
@@ -246,40 +245,48 @@ class TransformersRunner:
         new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True)
 
-    # ── Placeholder per Fase 2 ────────────────────────────────────────────────
     def generate_with_hidden_state(
         self,
         messages: list[dict],
-    ) -> tuple[str, Any]:
+    ) -> tuple[str, "np.ndarray | None"]:
         """
-        Come generate(), ma cattura anche l'hidden state dell'ultimo layer.
-        Usato nella Fase 2 per raccogliere le attivazioni.
+        Come generate(), ma cattura l'ultimo token del prefill per ogni layer.
+
+        Registra un hook su ciascuno dei 32 transformer block. Ogni hook
+        viene eseguito appena il layer completa il forward pass durante il
+        prefill: il vettore viene spostato immediatamente su CPU (float16)
+        così la VRAM non accumula mai più di un hidden state alla volta.
+
+        I decode step (seq_len == 1) vengono ignorati perché l'informazione
+        rilevante per la predizione dell'allucinazione è nel prefill.
 
         Returns:
-            (raw_output_str, last_hidden_state_tensor)
+            (raw_output_str, activations)
+            activations: numpy float16 shape (num_layers, hidden_size)
+                         None se qualcosa è andato storto
         """
         if not self._loaded:
             self.load()
 
         import torch
+        import numpy as np
 
-        captured: dict[str, Any] = {}
-        _prefill_done = [False]  # list to allow mutation inside nested function
+        num_layers = len(self.model.model.layers)
+        captured: dict[int, "torch.Tensor"] = {}
 
-        def _hook(module, input, output):
-            # Capture only the prefill pass (first forward call).
-            # model.generate() fires this hook once per token; subsequent calls
-            # have seq_len=1 (decode step) and would overwrite the prefill state.
-            if _prefill_done[0]:
-                return
-            hidden = output[0] if isinstance(output, tuple) else output
-            captured["last_hidden"] = hidden.detach().cpu()
-            _prefill_done[0] = True
+        def make_hook(layer_idx: int):
+            def _hook(module, input, output):
+                # seq_len > 1 → prefill pass; seq_len == 1 → decode step (ignora)
+                hidden = output[0] if isinstance(output, tuple) else output
+                if hidden.shape[1] > 1 and layer_idx not in captured:
+                    # Sposta subito su CPU float16: libera la VRAM immediatamente
+                    captured[layer_idx] = hidden[0, -1, :].detach().to(torch.float16).cpu()
+            return _hook
 
-        # Registra l'hook sull'ultimo transformer block
-        # Qwen2: model.model.layers[-1]
-        last_layer = self.model.model.layers[-1]
-        handle = last_layer.register_forward_hook(_hook)
+        handles = [
+            layer.register_forward_hook(make_hook(i))
+            for i, layer in enumerate(self.model.model.layers)
+        ]
 
         try:
             text = self.tokenizer.apply_chat_template(
@@ -305,15 +312,23 @@ class TransformersRunner:
                 max_new_tokens=self.config.max_new_tokens,
                 do_sample=False,
                 pad_token_id=self.tokenizer.eos_token_id,
-                output_hidden_states=False,   # usiamo l'hook invece
+                output_hidden_states=False,
             )
 
-        handle.remove()
+        for h in handles:
+            h.remove()
 
         new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
         raw_output = self.tokenizer.decode(new_tokens, skip_special_tokens=True)
 
-        return raw_output, captured.get("last_hidden", None)
+        if len(captured) == num_layers:
+            activations = torch.stack(
+                [captured[i] for i in range(num_layers)]
+            ).numpy()                              # shape: (num_layers, hidden_size)
+        else:
+            activations = None
+
+        return raw_output, activations
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -412,12 +427,11 @@ def run_inference_on_samples(
             else:
                 messages = build_prompt(sample)
                 if capture_activations:
-                    import numpy as np
-                    raw_output, hidden = runner.generate_with_hidden_state(messages)
+                    raw_output, activations = runner.generate_with_hidden_state(messages)
                     sample.model_raw_output = raw_output
-                    if hidden is not None:
-                        # Pool: last token del prefill → vettore (4096,) float16
-                        sample.hidden_vec = hidden[0, -1, :].to(torch.float16).numpy()
+                    if activations is not None:
+                        # shape: (num_layers, hidden_size) float16
+                        sample.hidden_vec = activations
                 else:
                     sample.model_raw_output = runner.generate(messages)
         except torch.cuda.OutOfMemoryError as exc:
@@ -477,15 +491,9 @@ def run_inference_parallel(
     model.generate() rilascia il Python GIL durante le operazioni CUDA, quindi
     le due GPU lavorano davvero in parallelo (~2x throughput).
 
-    Uso in pipeline o notebook:
-        samples = run_inference_parallel(samples, runner_cfg, num_gpus=2)
-
-    Args:
-        samples:             lista di BFCLSample da processare
-        config:              configurazione base (device_map viene ignorato)
-        num_gpus:            numero di GPU da usare (default 2)
-        progress_every:      frequenza del log di progresso per worker
-        capture_activations: se True, cattura hidden_vec per ogni sample
+    Per i sample multi-turn con sequenze molto lunghe è necessario impostare
+    max_seq_len in RunnerConfig (es. 3072) per evitare OOM che corromperebbero
+    il contesto CUDA rendendo la GPU inutilizzabile per i sample successivi.
     """
     import dataclasses
     import torch
@@ -506,11 +514,9 @@ def run_inference_parallel(
         samples[i * chunk_size : (i + 1) * chunk_size]
         for i in range(num_gpus - 1)
     ]
-    chunks.append(samples[(num_gpus - 1) * chunk_size :])  # ultimo: eventuale resto
+    chunks.append(samples[(num_gpus - 1) * chunk_size :])
 
     # Caricamento sequenziale: from_pretrained + bitsandbytes non sono thread-safe.
-    # Caricare i due modelli in sequenza evita race condition sull'inizializzazione
-    # del contesto CUDA; l'inferenza vera e propria parte in parallelo dopo.
     runners: list[TransformersRunner] = []
     for gpu_id in range(num_gpus):
         gpu_config = dataclasses.replace(config, device_map={"": gpu_id})
