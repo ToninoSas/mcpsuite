@@ -66,9 +66,9 @@ def _ckpt_save(
 
     if getattr(sample, "hidden_vec", None) is not None:
         acts_dir = checkpoint_dir / "acts"
-        acts_dir.mkdir(exist_ok=True)
+        acts_dir.mkdir(parents=True, exist_ok=True)
         safe_id    = sample.id.replace("/", "_").replace("\\", "_")
-        tmp_path   = acts_dir / f"{safe_id}.npy.tmp"
+        tmp_path   = acts_dir / f"{safe_id}_tmp.npy"   # deve finire in .npy: np.save lo aggiunge altrimenti
         final_path = acts_dir / f"{safe_id}.npy"
         np.save(tmp_path, sample.hidden_vec)
         tmp_path.rename(final_path)
