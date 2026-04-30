@@ -67,9 +67,12 @@ def run_pipeline(
     num_gpus: int = 1,
     weights: dict[str, float] | None = None,
     capture_activations: bool = False,
+    checkpoint_dir: str | None = None,
 ) -> None:
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
+
+    ckpt_dir = Path(checkpoint_dir) if checkpoint_dir else out.parent / "checkpoint"
 
     t_pipeline_start = time.time()
     timings: dict[str, float] = {}
@@ -118,11 +121,14 @@ def run_pipeline(
             samples = run_inference_parallel(
                 samples, runner_config, num_gpus=num_gpus,
                 capture_activations=capture_activations,
+                checkpoint_dir=ckpt_dir,
             )
         else:
             runner = build_runner(runner_config)
             samples = run_inference_on_samples(
-                samples, runner, capture_activations=capture_activations
+                samples, runner,
+                capture_activations=capture_activations,
+                checkpoint_dir=ckpt_dir,
             )
     else:
         print("[pipeline] skip_inference=True — salto l'inferenza")
@@ -420,6 +426,9 @@ def parse_args() -> argparse.Namespace:
                    help="Salta l'inferenza (utile per ri-valutare output già generati)")
     p.add_argument("--capture_activations", action="store_true",
                    help="Cattura hidden state durante l'inferenza e salva X.npy/y.npy/meta.jsonl in outputs/activations/")
+    p.add_argument("--checkpoint_dir", type=str, default=None,
+                   help="Directory checkpoint (default: outputs/checkpoint/). "
+                        "Se esiste già, riprende da dove si era fermato.")
     return p.parse_args()
 
 
@@ -450,4 +459,5 @@ if __name__ == "__main__":
         num_gpus=args.num_gpus,
         weights=weights,
         capture_activations=args.capture_activations,
+        checkpoint_dir=args.checkpoint_dir,
     )

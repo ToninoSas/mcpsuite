@@ -17,9 +17,67 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from loader import BFCLSample
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Checkpoint helpers
+# ─────────────────────────────────────────────────────────────────────────────
+
+def _ckpt_load(checkpoint_dir: Path) -> dict[str, dict]:
+    """
+    Legge tutti i sample già completati da un checkpoint.
+    Cerca outputs.jsonl in checkpoint_dir e in tutte le sub-dir gpu*/
+    (usate dalla modalità multi-GPU).
+    Restituisce {sample_id: {"model_raw_output": ..., "has_act": bool}}.
+    """
+    done: dict[str, dict] = {}
+    jsonl_paths = (
+        list(checkpoint_dir.glob("outputs.jsonl")) +
+        list(checkpoint_dir.glob("gpu*/outputs.jsonl"))
+    )
+    for path in jsonl_paths:
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+                done[rec["id"]] = rec
+            except (json.JSONDecodeError, KeyError):
+                pass  # linea corrotta — ignora
+    return done
+
+
+def _ckpt_save(
+    sample: BFCLSample,
+    checkpoint_dir: Path,
+    file_handle,
+) -> None:
+    """
+    Salva atomicamente un sample appena completato.
+    - hidden_vec → checkpoint_dir/acts/{id}.npy  (write-then-rename)
+    - output     → outputs.jsonl  (append + flush immediato)
+    """
+    import numpy as np
+
+    if getattr(sample, "hidden_vec", None) is not None:
+        acts_dir = checkpoint_dir / "acts"
+        acts_dir.mkdir(exist_ok=True)
+        safe_id    = sample.id.replace("/", "_").replace("\\", "_")
+        tmp_path   = acts_dir / f"{safe_id}.npy.tmp"
+        final_path = acts_dir / f"{safe_id}.npy"
+        np.save(tmp_path, sample.hidden_vec)
+        tmp_path.rename(final_path)
+
+    file_handle.write(
+        json.dumps({"id": sample.id, "model_raw_output": sample.model_raw_output},
+                   ensure_ascii=False) + "\n"
+    )
+    file_handle.flush()
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -391,6 +449,7 @@ def run_inference_on_samples(
     runner: TransformersRunner | LlamaCppRunner,
     progress_every: int = 50,
     capture_activations: bool = False,
+    checkpoint_dir: Path | None = None,
 ) -> list[BFCLSample]:
     """
     Esegue l'inferenza su tutti i sample, popolando `model_raw_output`.
@@ -400,12 +459,16 @@ def run_inference_on_samples(
                                (una per turno), eseguita con contesto accumulato.
 
     Se capture_activations=True e il runner è TransformersRunner, popola anche
-    sample.hidden_vec con il vettore (4096,) float16 catturato durante il prefill.
-    Per i multi-turn viene catturato solo l'ultimo turno (contesto completo).
+    sample.hidden_vec con il vettore (num_layers, hidden_size) float16.
+
+    Se checkpoint_dir è impostato, ogni sample completato viene salvato
+    immediatamente su disco. Al riavvio, i sample già presenti nel checkpoint
+    vengono saltati e i loro output ripristinati automaticamente.
 
     Modifica i sample in-place e restituisce la lista.
     """
     import gc
+    import numpy as np
     import torch
     from loader import MULTI_TURN_CATEGORIES
 
@@ -414,64 +477,103 @@ def run_inference_on_samples(
               "generate_with_hidden_state() — le activations non verranno catturate.")
         capture_activations = False
 
-    total = len(samples)
-    errors = 0
-    t0 = time.time()
+    # ── Checkpoint: ripristina sample già completati ──────────────────────────
+    done_ids: set[str] = set()
+    ckpt_file = None
 
-    for i, sample in enumerate(samples):
-        try:
-            if sample.category in MULTI_TURN_CATEGORIES:
-                sample.model_raw_output = run_multi_turn_inference(
-                    sample, runner, capture_activations=capture_activations
-                )
-            else:
-                messages = build_prompt(sample)
-                if capture_activations:
-                    raw_output, activations = runner.generate_with_hidden_state(messages)
-                    sample.model_raw_output = raw_output
-                    if activations is not None:
-                        # shape: (num_layers, hidden_size) float16
-                        sample.hidden_vec = activations
+    if checkpoint_dir is not None:
+        checkpoint_dir = Path(checkpoint_dir)
+        checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
+        done_data = _ckpt_load(checkpoint_dir)
+        if done_data:
+            print(f"[runner] Checkpoint trovato: {len(done_data)} sample già completati — riprendo")
+            for s in samples:
+                if s.id in done_data:
+                    s.model_raw_output = done_data[s.id]["model_raw_output"]
+                    safe_id  = s.id.replace("/", "_").replace("\\", "_")
+                    act_path = checkpoint_dir / "acts" / f"{safe_id}.npy"
+                    if act_path.exists():
+                        s.hidden_vec = np.load(act_path)
+                    done_ids.add(s.id)
+
+        ckpt_file = open(checkpoint_dir / "outputs.jsonl", "a", encoding="utf-8")
+
+    total     = len(samples)
+    n_skip    = len(done_ids)
+    n_todo    = total - n_skip
+    errors    = 0
+    processed = 0
+    t0        = time.time()
+
+    if n_skip:
+        print(f"[runner] {n_skip}/{total} sample saltati (già nel checkpoint), "
+              f"rimangono {n_todo}")
+
+    try:
+        for i, sample in enumerate(samples):
+            if sample.id in done_ids:
+                continue
+
+            try:
+                if sample.category in MULTI_TURN_CATEGORIES:
+                    sample.model_raw_output = run_multi_turn_inference(
+                        sample, runner, capture_activations=capture_activations
+                    )
                 else:
-                    sample.model_raw_output = runner.generate(messages)
-        except torch.cuda.OutOfMemoryError as exc:
-            # Dopo OOM il contesto CUDA può essere parzialmente corrotto.
-            # synchronize() attende che tutti i kernel pendenti finiscano
-            # prima di liberare la memoria, prevenendo il cascading
-            # "illegal memory access" sui sample successivi.
-            print(f"[runner] ✗ OOM {sample.id} (seq troppo lunga?) — pulisco e continuo")
-            sample.model_raw_output = "" if sample.category not in MULTI_TURN_CATEGORIES else []
-            errors += 1
-            gc.collect()
-            if torch.cuda.is_available():
-                try:
-                    torch.cuda.synchronize()
-                except Exception:
-                    pass
-                torch.cuda.empty_cache()
-        except Exception as exc:
-            print(f"[runner] ✗ sample {sample.id}: {exc}")
-            sample.model_raw_output = "" if sample.category not in MULTI_TURN_CATEGORIES else []
-            errors += 1
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+                    messages = build_prompt(sample)
+                    if capture_activations:
+                        raw_output, activations = runner.generate_with_hidden_state(messages)
+                        sample.model_raw_output = raw_output
+                        if activations is not None:
+                            sample.hidden_vec = activations
+                    else:
+                        sample.model_raw_output = runner.generate(messages)
 
-        if (i + 1) % 20 == 0:
-            gc.collect()
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
+            except torch.cuda.OutOfMemoryError:
+                print(f"[runner] ✗ OOM {sample.id} (seq troppo lunga?) — pulisco e continuo")
+                sample.model_raw_output = "" if sample.category not in MULTI_TURN_CATEGORIES else []
+                errors += 1
+                gc.collect()
+                if torch.cuda.is_available():
+                    try:
+                        torch.cuda.synchronize()
+                    except Exception:
+                        pass
+                    torch.cuda.empty_cache()
 
-        if (i + 1) % progress_every == 0 or (i + 1) == total:
-            elapsed = time.time() - t0
-            rate = (i + 1) / elapsed
-            eta  = (total - i - 1) / rate if rate > 0 else 0
-            print(
-                f"[runner] {i+1:>5}/{total}  "
-                f"err={errors}  "
-                f"{rate:.1f} sample/s  "
-                f"ETA {eta/60:.1f}min"
-            )
+            except Exception as exc:
+                print(f"[runner] ✗ sample {sample.id}: {exc}")
+                sample.model_raw_output = "" if sample.category not in MULTI_TURN_CATEGORIES else []
+                errors += 1
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            # Salva immediatamente (anche gli errori, per non riprocessarli)
+            if ckpt_file is not None:
+                _ckpt_save(sample, checkpoint_dir, ckpt_file)
+
+            processed += 1
+
+            if processed % 20 == 0:
+                gc.collect()
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+
+            if processed % progress_every == 0 or processed == n_todo:
+                elapsed = time.time() - t0
+                rate    = processed / elapsed if elapsed > 0 else 0
+                eta     = (n_todo - processed) / rate if rate > 0 else 0
+                print(
+                    f"[runner] {processed:>5}/{n_todo}  "
+                    f"err={errors}  "
+                    f"{rate:.1f} sample/s  "
+                    f"ETA {eta/60:.1f}min"
+                )
+    finally:
+        if ckpt_file is not None:
+            ckpt_file.close()
 
     return samples
 
@@ -482,6 +584,7 @@ def run_inference_parallel(
     num_gpus: int = 2,
     progress_every: int = 50,
     capture_activations: bool = False,
+    checkpoint_dir: Path | None = None,
 ) -> list[BFCLSample]:
     """
     Esegue l'inferenza usando data parallelism su più GPU.
@@ -506,7 +609,9 @@ def run_inference_parallel(
 
     if num_gpus == 1:
         runner = build_runner(config)
-        return run_inference_on_samples(samples, runner, progress_every, capture_activations)
+        return run_inference_on_samples(
+            samples, runner, progress_every, capture_activations, checkpoint_dir
+        )
 
     # Divide i sample in chunk contigui (mantiene l'ordine)
     chunk_size = len(samples) // num_gpus
@@ -526,13 +631,21 @@ def run_inference_parallel(
         print(f"[runner] GPU {gpu_id} pronta — {len(chunks[gpu_id])} sample assegnati")
         runners.append(r)
 
-    def _worker(runner: TransformersRunner, chunk: list[BFCLSample]) -> list[BFCLSample]:
-        return run_inference_on_samples(chunk, runner, progress_every, capture_activations)
+    def _worker(
+        runner: TransformersRunner,
+        chunk: list[BFCLSample],
+        gpu_id: int,
+    ) -> list[BFCLSample]:
+        # Ogni GPU scrive nel proprio sotto-dir per evitare conflitti su outputs.jsonl
+        gpu_ckpt = (Path(checkpoint_dir) / f"gpu{gpu_id}") if checkpoint_dir else None
+        return run_inference_on_samples(
+            chunk, runner, progress_every, capture_activations, gpu_ckpt
+        )
 
     results: dict[int, list[BFCLSample]] = {}
     with ThreadPoolExecutor(max_workers=num_gpus) as pool:
         futures = {
-            pool.submit(_worker, runners[gpu_id], chunks[gpu_id]): gpu_id
+            pool.submit(_worker, runners[gpu_id], chunks[gpu_id], gpu_id): gpu_id
             for gpu_id in range(num_gpus)
         }
         for future in as_completed(futures):
