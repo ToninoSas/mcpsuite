@@ -1,194 +1,114 @@
-# Phase 2 — Residual Stream Capture (Spec)
+# Phase 2 — Residual Stream Capture
 
-## Status: 🔲 Next to implement
-
----
-
-## Goal
-
-Re-run every sample from `phase1/outputs/labeled_dataset.jsonl` through
-Qwen3.5-9B-4bit, capture the hidden state from the final transformer block
-at the end of the prefill pass, and write the resulting activation matrix
-to disk alongside the binary labels.
-
-The output of Phase 2 is the training data for the binary classifier in Phase 3.
+## Status: ✅ Merged into Phase 1
 
 ---
 
-## The hook (already implemented)
+## What changed from the original spec
 
-`runner.py::TransformersRunner.generate_with_hidden_state()` already has the
-full implementation. It:
+Phase 2 (activation capture) is **no longer a separate script**.
+It is fully integrated into `phase1/pipeline.py` via the
+`--capture_activations` flag, which triggers step 1.6 of the pipeline.
 
-1. Registers a `register_forward_hook` on `self.model.model.layers[-1]`
-2. Runs `model.generate()` — the hook fires during prefill
-3. Removes the hook
-4. Returns `(raw_output_string, hidden_state_tensor)`
-
-The returned tensor has shape `[1, seq_len, hidden_size]` where
-`hidden_size = 4096` for Qwen3.5-9B.
-
-No changes needed to `runner.py` for Phase 2.
+There is no `capture.py` to write. Running the pipeline with
+`--capture_activations` produces both the labeled dataset and the
+activation files in a single pass.
 
 ---
 
-## What to build: `phase2/capture.py`
+## What was redesigned: all-layer capture
 
-```
-phase2/
-  capture.py      ← main script: reads JSONL, runs hooks, writes .npy
-  dataset.py      ← PyTorch Dataset wrapping .npy files
-  train.py        ← classifier training (Phase 3)
-```
+The original spec captured only the **last transformer layer**.
+The current implementation captures the **last token of the prefill
+from every layer** simultaneously.
 
-### `capture.py` logic
+**Why**: intermediate layers carry more localised semantic information.
+By capturing all 32 layers we can run a probing study (AUROC vs layer index)
+to find which layer is most discriminative for hallucination detection,
+rather than assuming the last layer is always best.
 
-```python
-# Pseudocode for capture.py
-
-runner = TransformersRunner(config)
-runner.load()
-
-for split in ["train", "val", "test"]:
-    records = load_jsonl(f"phase1/outputs/splits/{split}.jsonl")
-    
-    X = []   # will become np.ndarray (N, 4096) float16
-    y = []   # will become np.ndarray (N,) int8
-    meta = []
-    
-    for record in records:
-        messages = build_prompt_from_record(record)
-        
-        raw_output, hidden = runner.generate_with_hidden_state(messages)
-        
-        # Pool: last token of the prefill sequence
-        # hidden shape: [1, seq_len, 4096]
-        vec = hidden[0, -1, :].to(torch.float16).numpy()   # shape (4096,)
-        
-        X.append(vec)
-        y.append(record["label"])
-        meta.append({
-            "id": record["id"],
-            "category": record["category"],
-            "hallucination_type": record["hallucination_type"],
-        })
-    
-    out_dir = Path(f"phase2/outputs/{split}")
-    out_dir.mkdir(parents=True, exist_ok=True)
-    
-    np.save(out_dir / "X.npy", np.stack(X))    # (N, 4096) float16
-    np.save(out_dir / "y.npy", np.array(y, dtype=np.int8))
-    write_jsonl(out_dir / "meta.jsonl", meta)
-```
-
-### Important: use `generate_with_hidden_state`, not `generate`
-
-Phase 2 needs to capture activations during the **same forward pass**
-as inference. Do not run inference separately and then try to replay the
-prompt — you will get slightly different hidden states due to KV cache
-differences.
-
-### Checkpoint / resume
-
-Phase 2 may take hours. `capture.py` should checkpoint progress:
-- Write activations in batches of N (e.g. 100)
-- Track processed IDs in a `progress.json` file
-- On restart, skip already-processed IDs
+**How** (`generate_with_hidden_state` in `runner.py`):
+- Registers one `register_forward_hook` per layer (32 hooks total)
+- Each hook fires when `seq_len > 1` (prefill), ignores `seq_len == 1` (decode)
+- Captures `hidden[0, -1, :]` — last token — and moves it to CPU float16 immediately
+- VRAM cost: ~0 (one tensor at a time; previous layer already freed)
+- CPU RAM cost per sample: 32 × 4096 × 2 bytes = 262 KB
 
 ---
 
-## What to build: `phase2/dataset.py`
+## Storage layout (produced by pipeline.py step 1.6)
 
-```python
-class ActivationDataset(torch.utils.data.Dataset):
-    """
-    Memory-maps .npy files so the full matrix is never loaded into RAM.
-    Supports float32 upcasting from the float16 storage.
-    """
-    def __init__(self, split_dir: str, dtype=torch.float32):
-        self.X = np.load(f"{split_dir}/X.npy", mmap_mode="r")  # (N, 4096)
-        self.y = np.load(f"{split_dir}/y.npy", mmap_mode="r")  # (N,)
-        self.dtype = dtype
-
-    def __len__(self):
-        return len(self.y)
-
-    def __getitem__(self, idx):
-        x = torch.tensor(self.X[idx], dtype=self.dtype)
-        label = torch.tensor(self.y[idx], dtype=torch.float32)
-        return x, label
 ```
+outputs/activations/
+  train/
+    X.npy       float16, shape (N_train, 32, 4096)
+    y.npy       int8,    shape (N_train,)
+    meta.jsonl  one JSON per row: id, category, hallucination_type
+    shape.json  {"X_shape": [N, 32, 4096], "num_layers": 32, "hidden_size": 4096, ...}
+  val/
+    X.npy / y.npy / meta.jsonl / shape.json
+  test/
+    X.npy / y.npy / meta.jsonl / shape.json
+```
+
+`X[i, j, :]` = last-token hidden state of layer `j` during prefill of sample `i`.
+
+Expected sizes for 2000 samples (70/15/15 split):
+- Train X.npy: 1400 × 32 × 4096 × 2 bytes ≈ **368 MB**
+- Val X.npy:   300  × 32 × 4096 × 2 bytes ≈ **79 MB**
+- Test X.npy:  300  × 32 × 4096 × 2 bytes ≈ **79 MB**
 
 ---
 
-## Storage layout
-
-```
-phase2/
-  outputs/
-    train/
-      X.npy            float16, shape (N_train, 4096)
-      y.npy            int8,    shape (N_train,)
-      meta.jsonl       one JSON per line: id, category, hallucination_type
-      progress.json    checkpoint: set of processed IDs
-    val/
-      X.npy
-      y.npy
-      meta.jsonl
-    test/
-      X.npy
-      y.npy
-      meta.jsonl
-```
-
-Expected sizes (for 2000 total samples, 70/15/15 split, per pooling strategy):
-- Train X.npy: ~1400 × 4096 × 2 bytes ≈ **11.5 MB**
-- Val X.npy:   ~300 × 4096 × 2 bytes  ≈ **2.5 MB**
-- Test X.npy:  ~300 × 4096 × 2 bytes  ≈ **2.5 MB**
-
-This is small enough to keep in git-lfs or just in the repo.
-
----
-
-## Ablation: pooling strategies
-
-Two strategies implemented in `capture.py`, stored in separate subdirectories:
-
-| Strategy | Code | Notes |
-|---|---|---|
-| Last token | `hidden[0, -1, :]` | Primary; most "decisive" position |
-| Mean of last 20 tokens | `hidden[0, -20:, :].mean(dim=0)` | Ablation; smooths over final context window |
-
-```
-outputs/train/last_token/X.npy
-outputs/train/mean_last20/X.npy
-```
-
----
-
-## GPU memory note
-
-Running `generate_with_hidden_state()` with bitsandbytes NF4:
-- Qwen3.5-9B-4bit: ~5-6 GB model weights
-- Hidden state per sample: `seq_len × 4096 × 2` bytes ≈ negligible
-- Safe on 12 GB VRAM with batch_size=1
-
-If VRAM is tight, clear CUDA cache between samples:
-```python
-import gc, torch
-gc.collect()
-torch.cuda.empty_cache()
-```
-
----
-
-## CLI for capture.py
+## How to run
 
 ```bash
-python phase2/capture.py \
-    --splits_dir  phase1/outputs/splits \
-    --output_dir  phase2/outputs \
-    --model       Qwen/Qwen3.5-9B \
-    --pooling     last_token          # last_token | mean_last20
-    --batch_size  1
+cd phase1
+
+python pipeline.py \
+    --data_dir ./data \
+    --output   ./outputs/labeled_dataset.jsonl \
+    --total    2000 \
+    --num_gpus 2 \
+    --max_seq_len 3072 \
+    --capture_activations \
+    --weights '{"simple":0.20,"multiple":0.15,"parallel":0.10,
+                "parallel_multiple":0.05,"multi_turn_base":0.15,
+                "multi_turn_miss_func":0.15,"multi_turn_miss_param":0.15,
+                "multi_turn_long_context":0.0,"multi_turn_composite":0.05}'
 ```
+
+`--max_seq_len 3072` is required on Kaggle T4 (16 GB VRAM) to prevent OOM
+on long multi-turn sequences. Without it, OOM corrupts the CUDA context and
+causes `cudaErrorIllegalAddress` on subsequent samples.
+
+---
+
+## What still needs to be built (for Phase 3)
+
+```
+phase2/
+  dataset.py   ← PyTorch Dataset over X.npy / y.npy with layer selection
+  train.py     ← 32 independent MLP classifiers, one per layer; AUROC plot
+```
+
+See `docs/roadmap.md` Phase 3 for the full classifier spec.
+
+---
+
+## Pre-training data cleaning
+
+Before training classifiers, filter out `INFERENCE_ERROR` samples:
+
+```python
+import json, numpy as np
+
+meta = [json.loads(l) for l in open("outputs/activations/train/meta.jsonl")]
+valid = [i for i, m in enumerate(meta) if m["hallucination_type"] != "INFERENCE_ERROR"]
+
+X = np.load("outputs/activations/train/X.npy", mmap_mode="r")[valid]
+y = np.load("outputs/activations/train/y.npy",  mmap_mode="r")[valid]
+```
+
+`INFERENCE_ERROR` records have `label=1` but the model never ran —
+the hidden state was never captured and they carry no signal.

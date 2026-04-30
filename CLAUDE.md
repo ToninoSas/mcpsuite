@@ -7,15 +7,15 @@ Read `docs/` for deeper specs on each phase.
 
 ## Project goal
 
-Build a **binary classifier** that predicts — in real time — whether a
-qwen3.5-9B (4-bit quantized) agent is about to hallucinate during a tool call,
-by probing the **residual stream** (hidden states) of the model's final
-transformer block.
+Build **32 independent binary classifiers** (one per transformer layer) that predict —
+in real time — whether a Qwen3.5-9B (4-bit quantized) agent is about to hallucinate
+during a tool call, by probing the **residual stream** (hidden states) of every
+transformer block simultaneously.
 
-The classifier intercepts the hidden state *before* the model emits its tool
-call response and outputs a probability of hallucination (0 = correct call,
-1 = hallucination). This acts as a guardrail that can block or reroute the
-agent before the bad call is executed.
+Each classifier intercepts the hidden state of its layer *before* the model emits its
+tool call response and outputs a probability of hallucination (0 = correct call,
+1 = hallucination). A probing study (AUROC vs layer index) identifies the most
+discriminative layer, which then acts as a real-time guardrail.
 
 ---
 
@@ -25,17 +25,18 @@ agent before the bad call is executed.
 |---|---|
 | Model | `Qwen/Qwen3.5-9B` |
 | Quantization | 4-bit NF4 (bitsandbytes double-quant) |
-| Hidden size | 4096 (qwen3.5-9B) |
+| Hidden size | 4096 |
 | Num layers | 32 |
-| Hook target | `model.model.layers[-1]` (last transformer block) |
-| Pooling | Last-token hidden state → vector of dim 4096 (primary); mean of last 20 tokens (ablation) |
+| Hook target | All 32 transformer blocks (`model.model.layers[0..31]`) |
+| Pooling | Last-token hidden state of the prefill (`hidden[0, -1, :]`) |
+| Attention | `sdpa` (PyTorch SDPA, O(n) memory) |
 
 ---
 
-## Classifier architecture
+## Classifier architecture (per layer — 32 independent instances)
 
 ```
-Input: last-layer hidden state, pooled → R^4096
+Input: hidden state of layer i, last token → R^4096
   │
   ├─ Linear(4096, 512)
   ├─ BatchNorm1d(512)
@@ -45,8 +46,8 @@ Input: last-layer hidden state, pooled → R^4096
   └─ Sigmoid()
 
 Output: scalar in [0, 1]  (probability of hallucination)
-Loss:   BCELoss with class_weight (dataset is imbalanced)
-Optim:  AdamW
+Loss:   BCELoss with pos_weight = n_neg / n_pos  (class imbalance)
+Optim:  AdamW(lr=1e-3, weight_decay=1e-4)
 ```
 
 ---
@@ -55,41 +56,47 @@ Optim:  AdamW
 
 | Phase | Status | Output |
 |---|---|---|
-| Phase 1 — Test Suite & Dataset | ✅ Complete | `outputs/labeled_dataset.jsonl` |
-| Phase 2 — Residual Stream Capture | 🔲 Next | `outputs/activations/` (.npy) |
-| Phase 3 — Classifier Training | 🔲 Pending | `outputs/classifier.pt` |
+| Phase 1 — Test Suite, Dataset & Activation Capture | ✅ Complete | `outputs/labeled_dataset.jsonl`, `outputs/activations/` |
+| Phase 2 — Residual Stream Capture | ✅ Merged into Phase 1 | handled by `pipeline.py --capture_activations` |
+| Phase 3 — Per-Layer Classifier Training | 🔲 Next | `outputs/classifiers/` |
 | Phase 4 — Eval & Guardrail | 🔲 Pending | inference wrapper |
 
-**Phase 1 is fully implemented and tested (25/25 unit tests pass).**
-The next task is Phase 2: run the pipeline with `generate_with_hidden_state()`
-and save the hidden states to disk alongside labels.
+**Phases 1 and 2 are complete.** `pipeline.py --capture_activations` produces both
+the labeled dataset and `X.npy (N, 32, 4096)` activations in a single pass.
+The next task is Phase 3: train 32 independent MLP classifiers and plot AUROC vs layer.
 
 ---
 
 ## Repo structure
 
 ```
-bfcl_probe/
+mcpsuite/
 ├── CLAUDE.md                   ← you are here
 ├── docs/
 │   ├── roadmap.md              ← full 4-phase roadmap with design rationale
 │   ├── phase1_complete.md      ← Phase 1 implementation notes + schema
-│   ├── phase2_spec.md          ← Phase 2 spec (residual stream capture)
+│   ├── phase2_spec.md          ← Phase 2 spec (merged into Phase 1)
 │   └── data_schema.md          ← JSONL schema + BFCL dataset layout
 ├── phase1/
 │   ├── loader.py               ← loads BFCL, correlates Q + GT by id
 │   ├── sampler.py              ← proportional sampling across categories
 │   ├── evaluator.py            ← deterministic AST evaluator (no LLM judge)
-│   ├── runner.py               ← Qwen 4-bit inference + forward hook stub
-│   ├── pipeline.py             ← CLI orchestrator
+│   ├── runner.py               ← Qwen 4-bit inference + 32-layer forward hooks
+│   ├── pipeline.py             ← CLI orchestrator (phases 1-6 incl. activation save)
 │   ├── test_evaluator.py       ← 25 unit tests (all passing)
 │   ├── requirements.txt
 │   ├── data/                   ← BFCL dataset (downloaded separately)
-│   └── outputs/                ← labeled_dataset.jsonl + splits/
-└── phase2/                     ← TO BE CREATED
-    ├── capture.py              ← activation capture script
-    ├── dataset.py              ← PyTorch Dataset over .npy activations
-    └── train.py                ← classifier training loop
+│   └── outputs/
+│       ├── labeled_dataset.jsonl
+│       ├── metrics.json
+│       ├── splits/             ← train/val/test.jsonl
+│       └── activations/
+│           ├── train/          ← X.npy (N,32,4096), y.npy, meta.jsonl, shape.json
+│           ├── val/
+│           └── test/
+└── phase2/                     ← TO BE CREATED (Phase 3 work)
+    ├── dataset.py              ← PyTorch Dataset over X.npy / y.npy with layer selection
+    └── train.py                ← 32 independent MLP classifiers + AUROC vs layer plot
 ```
 
 ---
@@ -99,30 +106,45 @@ bfcl_probe/
 **Deterministic evaluation only — no LLM-as-judge.** The evaluator uses
 AST-matching against BFCL ground truth. A model output is `label=1`
 (hallucination) if the parsed function call does not match the ground truth
-within type-coercion and set-matching rules. This was an explicit user
-requirement.
+within type-coercion and set-matching rules.
 
-**Hallucination taxonomy.** Seven types are tracked and saved in the JSONL:
+**Hallucination taxonomy.** Eight types are tracked in the JSONL:
 `NO_CALL_MADE`, `WRONG_FUNCTION`, `MISSING_ARGS`, `EXTRA_ARGS`,
-`WRONG_ARG_VALUES`, `WRONG_ARG_NAMES`, `WRONG_CALL_COUNT`.
-This fine-grained label is stored alongside the binary label and may be
-used for multi-class experiments later.
+`WRONG_ARG_VALUES`, `WRONG_ARG_NAMES`, `WRONG_CALL_COUNT`, `INFERENCE_ERROR`.
+`INFERENCE_ERROR` samples must be **filtered before classifier training** — they
+carry no meaningful hidden state (inference never completed).
 
-**Last-token pooling.** The residual stream vector fed to the classifier is
-the hidden state of the *last input token* (the final token before generation
-begins), not mean-pooled. This is the most information-dense position for
-predicting what the model will generate next. This is a hyperparameter to
-ablate in Phase 3.
+**All-layer capture.** 32 forward hooks fire simultaneously during prefill.
+Each hook captures `hidden[0, -1, :]` (last token, float16) and moves it to CPU
+immediately. VRAM cost: ~0 (no accumulation); RAM cost: ~262 KB per sample.
+Output: `X.npy` shape `(N, 32, 4096)`.
 
-**Forward hook on `model.model.layers[-1]`.** The hook fires on the last
-transformer block's output *during the prefill of the prompt*, not during
-generation. This means we classify based on the model's internal state after
-reading the full context but before emitting the first token of the response.
-The stub is already in `runner.py::TransformersRunner.generate_with_hidden_state()`.
+**Last-token pooling.** The residual stream vector is the hidden state of the
+last input token (the final token before generation begins). This is the most
+information-dense position for predicting what the model will generate next.
 
-**Proportional sampling across BFCL categories.** Weights are defined in
-`sampler.py::DEFAULT_WEIGHTS`. Simple gets ~25%, multiple ~20%,
-multi_turn_base ~15%, etc. These are tunable.
+**32 independent classifiers.** One MLP per layer for a clean probing study.
+AUROC vs layer index identifies the most discriminative layer. The best-layer
+classifier is the candidate for the production guardrail.
+
+**Class imbalance.** Dataset is ~8% hallucinations. Use
+`pos_weight = n_neg / n_pos` in `BCELoss`. Do not oversample.
+
+**Proportional sampling across BFCL categories.** Multi-turn categories
+(`miss_func`, `miss_param`) have higher hallucination rates by design and are
+included to increase positive samples. `multi_turn_long_context` is excluded
+(too long even with truncation). Recommended weights: see `docs/roadmap.md`.
+
+**`max_seq_len=3072` required on Kaggle T4.** Long multi-turn sequences (8000+
+tokens) cause OOM during bitsandbytes dequant kernels, which corrupts the CUDA
+context (`cudaErrorIllegalAddress` cascade). Truncating to 3072 prevents OOM.
+
+**`attn_implementation="sdpa"`.** Reduces attention memory from O(n²) to O(n)
+using PyTorch's built-in SDPA kernel. No extra packages required.
+
+**Sequential dual-GPU model loading.** `bitsandbytes` NF4 init is not thread-safe.
+Models are loaded one at a time with `torch.cuda.synchronize()` between loads;
+only inference runs in parallel threads.
 
 ---
 
@@ -139,39 +161,48 @@ huggingface-cli download gorilla-llm/Berkeley-Function-Calling-Leaderboard \
 # Run unit tests (no GPU needed)
 cd phase1 && python -m pytest test_evaluator.py -v
 
-# Run full Phase 1 pipeline (needs GPU + model download ~15 GB)
+# Recommended full run (Kaggle T4 × 2, ~2000 samples, activations included)
 cd phase1 && python pipeline.py \
     --data_dir ./data \
     --output   ./outputs/labeled_dataset.jsonl \
     --total    2000 \
-    --model    Qwen/Qwen3.5-9B
+    --num_gpus 2 \
+    --max_seq_len 3072 \
+    --capture_activations \
+    --weights '{"simple":0.20,"multiple":0.15,"parallel":0.10,
+                "parallel_multiple":0.05,"multi_turn_base":0.15,
+                "multi_turn_miss_func":0.15,"multi_turn_miss_param":0.15,
+                "multi_turn_long_context":0.0,"multi_turn_composite":0.05}'
 
-# Quick smoke test (50 samples)
+# Quick smoke test (50 samples, no activations, single GPU)
 cd phase1 && python pipeline.py --data_dir ./data --total 50
 ```
 
+### New CLI flags added to pipeline.py
+
+| Flag | Description |
+|---|---|
+| `--capture_activations` | Capture 32-layer hidden states and save X.npy / y.npy |
+| `--max_seq_len N` | Truncate input to last N tokens (use 3072 on T4 16 GB) |
+| `--num_gpus N` | Data-parallel inference across N GPUs |
+| `--weights '{...}'` | Per-category sampling weights as JSON string |
+| `--no_multi_turn` | Zero-weight all multi-turn categories (quick single-turn run) |
+
 ---
 
-## What to build next — Phase 2
+## What to build next — Phase 3
 
-See `docs/phase2_spec.md` for the full spec. Summary:
+See `docs/roadmap.md` Phase 3 for the full spec. Summary:
 
-1. Create `phase2/capture.py` — iterates over `labeled_dataset.jsonl`,
-   calls `runner.TransformersRunner.generate_with_hidden_state()` for each
-   sample, and saves:
-   - `outputs/activations/{split}/X.npy`  — shape `(N, 4096)` float16
-   - `outputs/activations/{split}/y.npy`  — shape `(N,)` int8 labels
-   - `outputs/activations/{split}/meta.jsonl` — id, category, hallucination_type
+1. Create `phase2/dataset.py` — PyTorch `Dataset` that memory-maps `X.npy` and
+   `y.npy`, selects a specific layer by index, and filters `INFERENCE_ERROR` rows.
 
-2. Create `phase2/dataset.py` — PyTorch `Dataset` that memory-maps the .npy
-   files (no full RAM load).
-
-3. Create `phase2/train.py` — training loop for the binary classifier
-   with class_weight, AdamW, early stopping on val AUROC.
-
-The `generate_with_hidden_state()` method in `runner.py` is already
-implemented and tested — Phase 2 only needs to call it and wire up the
-storage layer.
+2. Create `phase2/train.py` — training loop for 32 independent MLP classifiers:
+   - Input: `X[:, layer_idx, :]` shape `(N, 4096)`
+   - Loss: `BCELoss(pos_weight=n_neg/n_pos)`
+   - Optimizer: `AdamW(lr=1e-3, weight_decay=1e-4)`
+   - Early stopping: patience=10 on val AUROC
+   - Output: `outputs/classifiers/layer_{i:02d}.pt` + `metrics.json` + AUROC plot
 
 ---
 
@@ -183,6 +214,7 @@ storage layer.
 - **Correlation key**: `id` field (e.g. `"simple_42"`, `"multi_turn_base_7"`)
 - **Categories used**: simple, multiple, parallel, parallel_multiple,
   multi_turn_base, multi_turn_miss_func, multi_turn_miss_param,
-  multi_turn_long_context, multi_turn_composite
+  multi_turn_composite
+- **Excluded**: `multi_turn_long_context` (too long even with max_seq_len=3072)
 
 See `docs/data_schema.md` for full field-by-field breakdown.

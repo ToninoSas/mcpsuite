@@ -17,6 +17,10 @@ Two GT formats exist in the dataset:
 The loader handles both transparently. `_build_gt_index()` returns both
 the GT dict and the `execution_result_type` per id.
 
+`BFCLSample` carries an optional `hidden_vec` field (numpy array,
+shape `(num_layers, hidden_size)` float16) populated during inference
+when `capture_activations=True`.
+
 ### `sampler.py`
 
 Proportional sampling with configurable per-category weights defined in
@@ -61,85 +65,115 @@ label=1  →  hallucination_type ∈ {
     WRONG_ARG_VALUES   arg name correct but value outside acceptable set
     WRONG_ARG_NAMES    arg present but under wrong key name
     WRONG_CALL_COUNT   # predicted calls ≠ # GT calls (parallel/multiple)
+    INFERENCE_ERROR    runner crashed during inference (OOM, CUDA error)
 }
 ```
+
+**Note**: `INFERENCE_ERROR` samples must be **filtered out before classifier
+training** — they carry no meaningful residual stream signal.
 
 ### `runner.py`
 
 Wraps HuggingFace `transformers` + `bitsandbytes` (NF4 4-bit).
 
-Key method for Phase 2:
+**`RunnerConfig`** key fields:
 ```python
-def generate_with_hidden_state(self, messages) -> tuple[str, torch.Tensor]:
-    # Registers a forward hook on model.model.layers[-1]
-    # Returns (raw_output_string, hidden_state_tensor[batch, seq, hidden])
+max_seq_len: int | None = None        # truncate input to last N tokens (3072 on T4 16GB)
+attn_implementation: str | None = "sdpa"  # PyTorch SDPA for memory-efficient attention
 ```
 
-The hook fires during the *prefill* pass. The returned tensor has shape
-`[1, seq_len, 4096]` where `seq_len` is the length of the full input
-(system prompt + function schemas + user query).
+**`generate_with_hidden_state()`** — captures the last token of the prefill
+from every transformer layer simultaneously:
+
+```python
+def generate_with_hidden_state(self, messages) -> tuple[str, np.ndarray | None]:
+    # Registers one forward hook per layer (32 total for Qwen3.5-9B)
+    # Each hook fires during prefill (seq_len > 1), captures hidden[0, -1, :]
+    # and immediately moves it to CPU float16 (VRAM not accumulated)
+    # Returns (raw_output_string, activations)
+    # activations: numpy float16, shape (num_layers, hidden_size) = (32, 4096)
+    #              None if any hook failed to fire
+```
+
+Key design points:
+- Hooks detect prefill vs decode by checking `seq_len > 1`
+- Each captured tensor is moved to CPU immediately → only ~262 KB per sample in RAM
+- `attn_implementation="sdpa"` reduces attention memory from O(n²) to O(n)
+- `max_seq_len` truncates from the left (keeps most recent context) before tokenization
+
+**Dual-GPU parallelism** (`run_inference_parallel`):
+- Models are loaded **sequentially** (bitsandbytes is not thread-safe)
+- `torch.cuda.synchronize()` between loads prevents CUDA context race conditions
+- All samples (single-turn and multi-turn) are divided equally across GPUs
+- Requires `max_seq_len` to be set when multi-turn samples are present, otherwise
+  OOM on long sequences corrupts the CUDA context (`cudaErrorIllegalAddress` cascade)
+
+**OOM recovery** in `run_inference_on_samples`:
+- `torch.cuda.OutOfMemoryError` is caught separately from generic exceptions
+- `torch.cuda.synchronize()` is called before `empty_cache()` to wait for
+  pending kernels and prevent cascading illegal memory access on next sample
 
 ### `pipeline.py`
 
-CLI orchestrator. Runs steps 1-5 in sequence:
+CLI orchestrator. Runs steps 1-6 in sequence:
 1. `load_all()` — load corpus
-2. `proportional_sample()` — sample with weights
-3. `run_inference_on_samples()` — Qwen inference
-4. `evaluate()` per sample — assign labels
+2. `proportional_sample()` — sample with configurable category weights
+3. `run_inference_on_samples()` / `run_inference_parallel()` — Qwen inference,
+   optionally with activation capture
+4. `evaluate()` per sample — assign labels + hallucination type
 5. Write `labeled_dataset.jsonl` + `splits/`
+6. If `--capture_activations`: write `activations/{split}/X.npy` + `y.npy` +
+   `meta.jsonl` + `shape.json`
 
-`--skip_inference` flag re-uses existing `model_raw_output` fields for
-re-evaluation without re-running inference. Useful when tuning the evaluator.
-
----
-
-## Output schema
-
-Each line of `labeled_dataset.jsonl`:
-
-```jsonc
-{
-  "id": "simple_42",
-  "category": "simple",                    // BFCL category name
-  "question": [[                           // list of turns, each is list of messages
-    {"role": "user", "content": "..."}
-  ]],
-  "functions": [{                          // OpenAI function schema format
-    "name": "...",
-    "description": "...",
-    "parameters": {"type": "dict", "properties": {...}, "required": [...]}
-  }],
-  "ground_truth": [                        // list of acceptable calls
-    {"function_name": {"param": [val1, val2]}}
-  ],
-  "execution_result_type": [],             // ["exact_match"] for exec samples
-  "model_raw_output": "func(a=1, b=2)",   // raw string from Qwen
-  "label": 0,                             // 0=correct, 1=hallucination
-  "hallucination_type": null,             // null if label=0
-  "eval_details": {                       // diagnostic dict from evaluator
-    "category": "simple",
-    "raw_output_len": 24,
-    "predicted_calls": [{"name": "...", "arguments": {...}}],
-    "n_predicted": 1,
-    "n_expected": 1,
-    "comparisons": [{"matched": true, "name_match": true, "args_match": true, ...}]
-  }
-}
+**New CLI flags**:
+```
+--capture_activations   capture hidden states from all layers during inference
+--max_seq_len N         truncate input sequences to last N tokens (use 3072 on T4)
+--num_gpus N            data-parallel inference across N GPUs
+--weights '{...}'       per-category sampling weights as JSON string
+--no_multi_turn         zero-weight all multi-turn categories (quick single-turn run)
 ```
 
+**Metrics**: at the end of every run the pipeline prints and saves `metrics.json`:
+- Overall accuracy and hallucination rate
+- Per-category breakdown (N, accuracy, hallucination rate, top hallucination type)
+- Wall-clock timing per phase (load, sample, inference, eval, save, activations)
+- Inference throughput (samples/s)
+
 ---
 
-## Known limitations / future improvements
+## Activation output schema
 
-- Multi-turn evaluation currently applies single-turn AST logic per turn.
-  For `multi_turn_*` categories the state-based evaluation (comparing
-  backend state after execution) is not implemented — only response-based
-  matching. This may inflate false negatives on multi-turn samples.
+```
+outputs/activations/
+  train/
+    X.npy       float16, shape (N_train, 32, 4096)
+    y.npy       int8,    shape (N_train,)
+    meta.jsonl  one JSON per row: id, category, hallucination_type
+    shape.json  {"X_shape": [N, 32, 4096], "num_layers": 32, "hidden_size": 4096, ...}
+  val/   (same structure)
+  test/  (same structure)
+```
 
-- The `execution_result_type: "real_time"` category (samples that require
-  live API execution) is currently evaluated with AST matching, which may
-  not be accurate. These samples could be filtered out or handled separately.
+`X[i, j, :]` is the last-token hidden state of layer `j` during the prefill
+of sample `i`. Shape `(32, 4096)` per sample.
 
-- Qwen's tool-call format may vary between model versions. The parser
-  handles 4 formats but new variants may appear. The fallback is
-  `NO_CALL_MADE` which is conservative (marks as hallucination).
+---
+
+## Known limitations
+
+- Multi-turn evaluation applies single-turn AST logic per turn. State-based
+  evaluation (comparing backend state after execution) is not implemented —
+  only response-based matching. This may inflate false negatives on multi-turn.
+
+- `INFERENCE_ERROR` samples (OOM, CUDA crash) have `label=1` but carry no
+  meaningful hidden state. Filter them before classifier training.
+
+- `execution_result_type: "real_time"` samples are evaluated with AST matching,
+  which may not be accurate. Consider filtering these.
+
+- With `max_seq_len=3072` on multi-turn, long conversation history is truncated
+  from the left. The model loses early context but the most recent turns are kept.
+
+- Qwen's tool-call format may vary between model versions. The parser handles
+  4 formats; new variants fall back to `NO_CALL_MADE`.

@@ -4,7 +4,7 @@
 
 The goal is to predict, *before* a tool call is emitted, whether a
 Qwen3.5-9B agent is about to hallucinate. The prediction signal comes from
-the model's own internal state — the residual stream of the final transformer
+the model's own internal state — the residual stream of every transformer
 block — not from post-hoc output analysis.
 
 ```
@@ -14,17 +14,17 @@ User query + function schemas
   Qwen3.5-9B-4bit
   [prefill phase]
         │
-        ├──► forward hook on layers[-1]
+        ├──► forward hooks on ALL layers (0..31)
         │         │
         │         ▼
-        │    hidden state [1, seq, 4096]
+        │    hidden states [32, 4096]  (last token, each layer)
         │         │
-        │    last-token pool → R^4096
+        │    Binary Classifier per layer
+        │    (Linear→BatchNorm→ReLU→Sigmoid)
         │         │
-        │    Binary Classifier
-        │    (Linear→ReLU→Sigmoid)
+        │    AUROC per layer → plot → find best layer
         │         │
-        │    P(hallucination)
+        │    Best classifier: P(hallucination)
         │         │
         │    ┌────┴─────┐
         │    │ p > θ    │ p ≤ θ
@@ -37,73 +37,65 @@ User query + function schemas
 
 ---
 
-## Phase 1 — Test Suite & Dataset  ✅ COMPLETE
+## Phase 1 — Test Suite, Dataset & Activation Capture  ✅ COMPLETE
 
-**Goal**: Build a labeled dataset of (prompt, function_schema, model_output,
-label) tuples from the BFCL benchmark.
+**Goal**: Build a labeled dataset of (prompt, function_schema, model_output, label)
+tuples from BFCL, and capture residual stream activations from all transformer
+layers during the same inference pass.
 
 **Source**: Berkeley Function-Calling Leaderboard v3
 (`gorilla-llm/Berkeley-Function-Calling-Leaderboard`)
 
-**Categories** (proportional sampling):
-- `simple` (25%) — one function, one call
-- `multiple` (20%) — multiple functions available, one correct
-- `parallel` (10%) — one function, multiple simultaneous calls
-- `parallel_multiple` (5%) — multiple functions, multiple calls
-- `multi_turn_base` (15%) — multi-turn conversation, complete info
-- `multi_turn_miss_func` (8%) — requested function unavailable
-- `multi_turn_miss_param` (8%) — underspecified parameters
-- `multi_turn_long_context` (5%) — long conversation history
-- `multi_turn_composite` (4%) — combined multi-turn challenges
+**Categories** (proportional sampling, recommended weights for full run):
+- `simple` (20%)
+- `multiple` (15%)
+- `parallel` (10%)
+- `parallel_multiple` (5%)
+- `multi_turn_base` (15%)
+- `multi_turn_miss_func` (15%) ← high hallucination rate by design
+- `multi_turn_miss_param` (15%) ← high hallucination rate by design
+- `multi_turn_long_context` (0%) ← excluded: too long even with truncation
+- `multi_turn_composite` (5%)
 
-**Labeling strategy**: deterministic AST matching against ground truth.
-No LLM-as-judge. A call is `label=1` if it does not match within
-type-coercion and set-matching rules.
+**Labeling**: deterministic AST matching against BFCL ground truth. No LLM judge.
 
-**Files**: `phase1/`
+**Activation capture**: `--capture_activations` flag in `pipeline.py`.
+Registers 32 hooks (one per transformer layer), captures `hidden[0, -1, :]`
+(last token of prefill) per layer, saves as `X.npy` shape `(N, 32, 4096)`.
 
-**Output**: `phase1/outputs/labeled_dataset.jsonl` + `splits/`
+**Key constraints**:
+- `--max_seq_len 3072` required on Kaggle T4 to prevent CUDA context corruption
+- Filter `INFERENCE_ERROR` samples before classifier training
+- Multi-turn included (except `long_context`) — higher hallucination rate
+
+**Output**:
+```
+outputs/
+  labeled_dataset.jsonl
+  metrics.json
+  splits/train.jsonl, val.jsonl, test.jsonl
+  activations/
+    train/  X.npy (N,32,4096)  y.npy  meta.jsonl  shape.json
+    val/    ...
+    test/   ...
+```
 
 ---
 
-## Phase 2 — Residual Stream Capture  🔲 NEXT
+## Phase 2 — Residual Stream Capture  ✅ Merged into Phase 1
 
-**Goal**: Re-run the labeled samples through Qwen, capture the hidden state
-from the final transformer block at the end of the prefill pass, and store
-the activations alongside their labels.
-
-**Hook target**: `model.model.layers[-1]` — fires once per forward pass
-during prefill.
-
-**Pooling**: last-token hidden state (index `[-1]` on the sequence dim).
-Mean pooling is a secondary ablation.
-
-**Storage format**:
-```
-outputs/activations/
-  train/
-    X.npy          shape (N_train, 4096)  dtype float16
-    y.npy          shape (N_train,)       dtype int8
-    meta.jsonl     id, category, hallucination_type per row
-  val/   (same)
-  test/  (same)
-```
-
-**Implementation note**: `runner.py::TransformersRunner.generate_with_hidden_state()`
-is already implemented. Phase 2 only needs `capture.py` to iterate the JSONL
-and call it, and `dataset.py` to wrap the .npy files in a PyTorch Dataset.
-
-**Key decision**: capture activations from the *prefill* of the full prompt
-(system + functions + user query), not from the generation pass. The model
-has already "decided" what to generate by this point.
+No separate script. Fully handled by `pipeline.py --capture_activations`.
+See `docs/phase2_spec.md` for details and the pre-training data cleaning step.
 
 ---
 
-## Phase 3 — Binary Classifier Training  🔲 PENDING
+## Phase 3 — Per-Layer Classifier Training  🔲 NEXT
 
-**Goal**: Train a shallow MLP on the captured activations.
+**Goal**: Train 32 independent binary classifiers (one per transformer layer)
+on the captured activations. Plot AUROC vs layer index to find which layer
+carries the strongest hallucination signal.
 
-**Architecture** (fixed, per user spec):
+**Architecture** (same for all 32 classifiers):
 ```python
 nn.Sequential(
     nn.Linear(4096, 512),
@@ -115,57 +107,57 @@ nn.Sequential(
 )
 ```
 
-**Training config**:
-- Loss: `BCELoss` with `pos_weight` to handle class imbalance
+**Training config** (per layer):
+- Input: `X[:, layer_idx, :]` — shape `(N, 4096)`
+- Loss: `BCELoss` with `pos_weight = n_neg / n_pos` (handles class imbalance)
 - Optimizer: `AdamW(lr=1e-3, weight_decay=1e-4)`
-- Scheduler: cosine annealing or ReduceLROnPlateau on val AUROC
-- Early stopping: patience=10 epochs on val AUROC
-- Batch size: 256 (activations fit in RAM, no GPU needed for training)
-- Epochs: up to 100 (early stopping will kick in)
+- Early stopping: patience=10 on val AUROC
+- Batch size: 256
 
-**Metrics to track**:
-- Primary: AUROC on val set
-- Secondary: F1, precision, recall at threshold θ=0.5
-- Threshold tuning: optimize θ on val set for target precision/recall
+**Output per layer**:
+- `outputs/classifiers/layer_{i:02d}.pt` — saved model weights
+- `outputs/classifiers/metrics.json` — AUROC, F1, precision, recall per layer
 
-**Ablations to run**:
-1. Last-token vs mean-pool
-2. Layer -1 vs layer -2 vs layer -4
-3. With vs without BatchNorm
-4. Dropout rate (0.1, 0.3, 0.5)
+**Key output**: plot of `AUROC vs layer index (0-31)`. The peak layer is
+the candidate for the production guardrail.
+
+**Files to build**:
+```
+phase2/
+  dataset.py   ← ActivationDataset: memory-maps X.npy, selects layer by index
+  train.py     ← training loop for all 32 layers, saves metrics + plot
+```
+
+**Pre-training step**: filter `INFERENCE_ERROR` from X/y before training.
+See `docs/phase2_spec.md` for the filtering snippet.
 
 ---
 
-## Phase 4 — Evaluation & Deployment  🔲 PENDING
+## Phase 4 — Evaluation & Guardrail  🔲 PENDING
 
-**Goal**: Integrate the trained classifier as a real-time guardrail.
+**Goal**: Integrate the best-layer classifier as a real-time guardrail.
 
 **Evaluation**:
 - AUROC, AUPRC on held-out test set
-- Per-hallucination-type breakdown (which types are hardest to catch?)
-- Latency benchmark (hook + classifier overhead in ms)
-- False positive analysis (what correct calls get blocked?)
+- Per-hallucination-type breakdown
+- Latency benchmark (32 hooks + classifier overhead in ms)
+- False positive analysis
 
-**Guardrail integration**:
+**Guardrail**:
 ```python
 class HallucinationGuardrail:
-    def __init__(self, runner, classifier, threshold=0.5):
+    def __init__(self, runner, classifier, best_layer, threshold=0.5):
         ...
     def generate_safe(self, messages):
-        output, hidden = runner.generate_with_hidden_state(messages)
-        prob = classifier(pool(hidden))
+        output, activations = runner.generate_with_hidden_state(messages)
+        # activations: (32, 4096) — select best layer
+        vec = torch.tensor(activations[best_layer], dtype=torch.float32)
+        prob = classifier(vec.unsqueeze(0))
         if prob > threshold:
-            # Option A: block and return error
-            # Option B: retry with modified prompt
-            # Option C: flag for human review
+            # block / retry / flag
             ...
         return output, prob
 ```
-
-**Active learning loop**:
-- Flag high-confidence wrong predictions for manual review
-- Add reviewed samples back to training set
-- Re-train monthly or when error rate exceeds threshold
 
 ---
 
@@ -173,12 +165,13 @@ class HallucinationGuardrail:
 
 | Decision | Choice | Rationale |
 |---|---|---|
-| Evaluation | Deterministic AST | User requirement; avoids cost and non-determinism of LLM judge |
-| Hook layer | Last transformer block | Most context-integrated representation; closest to output |
-| Pooling | Last-token (primary); mean of last 20 tokens (ablation) | Last token is the "summary" token before generation |
-| Quantization | NF4 double-quant | Best quality/VRAM tradeoff; preserves hidden state fidelity |
-| Hallucination label | Binary (0/1) | Simple classifier target; fine-grained type stored for analysis |
-| Hidden dim input | 4096 (Qwen3.5-9B) | Fixed by model architecture |
-| Classifier width | 512 | User specification |
-| Activation | ReLU | User specification |
-| Output activation | Sigmoid | User specification; appropriate for binary BCE |
+| Evaluation | Deterministic AST | Avoids cost and non-determinism of LLM judge |
+| Hook layers | All 32 transformer blocks | Probing study to find most discriminative layer |
+| Pooling | Last token of prefill (per layer) | Most information-dense position before generation |
+| Quantization | NF4 double-quant | Best quality/VRAM tradeoff on T4 |
+| Hallucination label | Binary (0/1) | Simple classifier target; fine-grained type stored separately |
+| Classifier per layer | 32 independent MLPs | Clean probing: each measures intrinsic discriminability of that layer |
+| Multi-turn | Included (except long_context) | Higher hallucination rate; `max_seq_len=3072` prevents OOM |
+| INFERENCE_ERROR | Filtered before training | No real signal: inference never ran for these samples |
+| Attention impl | `sdpa` (PyTorch SDPA) | Reduces attention memory O(n²)→O(n); no extra packages |
+| Dual-GPU loading | Sequential | bitsandbytes not thread-safe; parallel loading causes CUDA races |

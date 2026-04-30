@@ -1,7 +1,20 @@
-# BFCL Hallucination Probe — Fase 1
+# BFCL Hallucination Probe
 
-Pipeline completa per costruire un dataset labellato di allucinazioni
-su tool call, partendo dal Berkeley Function-Calling Leaderboard (BFCL).
+Pipeline completa per costruire un dataset labellato di allucinazioni su tool call
+(Berkeley Function-Calling Leaderboard), catturare il residual stream di tutti i
+layer del modello e addestrare classificatori per layer per predire le allucinazioni
+prima che vengano emesse.
+
+---
+
+## Stato del progetto
+
+| Fase | Stato | Output |
+|---|---|---|
+| Phase 1 — Dataset & pipeline di inferenza | ✅ Completa | `outputs/labeled_dataset.jsonl` |
+| Phase 2 — Cattura residual stream | ✅ Integrata nella Phase 1 | `outputs/activations/` |
+| Phase 3 — Addestramento classificatori per layer | 🔲 Prossima | `outputs/classifiers/` |
+| Phase 4 — Valutazione & guardrail real-time | 🔲 In attesa | inference wrapper |
 
 ---
 
@@ -10,32 +23,24 @@ su tool call, partendo dal Berkeley Function-Calling Leaderboard (BFCL).
 | Componente | Minimo | Raccomandato |
 |---|---|---|
 | Python | 3.10 | 3.11 / 3.12 |
-| GPU VRAM | 12 GB | 24 GB |
+| GPU VRAM | 16 GB | 2 × 16 GB (Kaggle T4) |
 | RAM | 16 GB | 32 GB |
-| Disco | 20 GB | 40 GB |
-
-> Se hai meno di 16 GB di VRAM usa il backend `llama_cpp` con un GGUF Q4_K_M
-> anziché `transformers`. Vedi la sezione "Backend alternativo" in fondo.
+| Disco | 25 GB | 50 GB |
 
 ---
 
 ## Step 1 — Ambiente Python
 
 ```bash
-# Crea un venv (o conda)
 python -m venv .venv
 source .venv/bin/activate        # Windows: .venv\Scripts\activate
 
-# Installa le dipendenze
+cd phase1
 pip install -r requirements.txt
 ```
 
-Se hai una GPU NVIDIA e vuoi bitsandbytes con CUDA:
+Se hai una GPU NVIDIA:
 ```bash
-# Controlla la versione CUDA installata
-nvcc --version
-
-# Installa il wheel corretto (es. CUDA 12.1)
 pip install bitsandbytes --extra-index-url https://download.pytorch.org/whl/cu121
 ```
 
@@ -44,18 +49,16 @@ pip install bitsandbytes --extra-index-url https://download.pytorch.org/whl/cu12
 ## Step 2 — Scarica il dataset BFCL
 
 ```bash
-# Assicurati di essere autenticato (serve un account HuggingFace gratuito)
 huggingface-cli login
 
-# Scarica tutto il dataset nella cartella data/
 huggingface-cli download gorilla-llm/Berkeley-Function-Calling-Leaderboard \
     --repo-type dataset \
-    --local-dir ./data
+    --local-dir ./phase1/data
 ```
 
-Dopo il download la struttura sarà:
+Struttura attesa:
 ```
-data/
+phase1/data/
   BFCL_v3_simple.json
   BFCL_v3_multiple.json
   BFCL_v3_parallel.json
@@ -63,7 +66,6 @@ data/
   BFCL_v3_multi_turn_base.json
   BFCL_v3_multi_turn_miss_func.json
   BFCL_v3_multi_turn_miss_param.json
-  BFCL_v3_multi_turn_long_context.json
   BFCL_v3_multi_turn_composite.json
   possible_answer/
     BFCL_v3_simple.json
@@ -75,60 +77,79 @@ data/
 ## Step 3 — Verifica i test unitari
 
 ```bash
+cd phase1
 python -m pytest test_evaluator.py -v
 ```
 
-Output atteso: `25 passed in 0.Xs`
+Output atteso: `25 passed`
 
 ---
 
 ## Step 4 — Avvia la pipeline completa
 
+### Run raccomandato (Kaggle T4 × 2, ~2000 sample, cattura attivazioni)
+
 ```bash
+cd phase1
 python pipeline.py \
-    --data_dir  ./data \
-    --output    ./outputs/labeled_dataset.jsonl \
-    --total     2000 \
-    --model     Qwen/Qwen3.5-9B \
-    --backend   transformers \
-    --seed      42
+    --data_dir ./data \
+    --output   ./outputs/labeled_dataset.jsonl \
+    --total    2000 \
+    --num_gpus 2 \
+    --max_seq_len 3072 \
+    --capture_activations \
+    --weights '{"simple":0.20,"multiple":0.15,"parallel":0.10,
+                "parallel_multiple":0.05,"multi_turn_base":0.15,
+                "multi_turn_miss_func":0.15,"multi_turn_miss_param":0.15,
+                "multi_turn_long_context":0.0,"multi_turn_composite":0.05}'
+```
+
+### Test rapido (50 sample, no attivazioni, singola GPU)
+
+```bash
+cd phase1
+python pipeline.py --data_dir ./data --total 50
 ```
 
 ### Parametri principali
 
 | Parametro | Default | Descrizione |
 |---|---|---|
-| `--data_dir` | `./data` | Cartella con i file BFCL scaricati |
+| `--data_dir` | `./data` | Cartella con i file BFCL |
 | `--output` | `./outputs/labeled_dataset.jsonl` | File JSONL di output |
-| `--total` | `2000` | Numero totale di sample da processare |
+| `--total` | `2000` | Numero totale di sample |
 | `--model` | `Qwen/Qwen3.5-9B` | Modello HuggingFace o path locale |
-| `--backend` | `transformers` | `transformers` oppure `llama_cpp` |
+| `--num_gpus` | `1` | GPU da usare in parallelo |
+| `--max_seq_len` | `None` | Tronca l'input agli ultimi N token (usa 3072 su T4 16 GB) |
+| `--capture_activations` | off | Cattura gli hidden state di tutti i layer |
+| `--weights '{...}'` | pesi default | Pesi di campionamento per categoria (JSON) |
+| `--no_multi_turn` | off | Esclude tutte le categorie multi-turn |
 | `--max_new_tokens` | `512` | Token massimi generati per risposta |
 | `--seed` | `42` | Seme per riproducibilità |
-| `--skip_inference` | off | Salta l'inferenza (ri-valuta output esistenti) |
-
-### Esempio con budget ridotto (test rapido)
-
-```bash
-python pipeline.py \
-    --data_dir ./data \
-    --output   ./outputs/test_run.jsonl \
-    --total    100 \
-    --model    Qwen/Qwen3.5-9B
-```
 
 ---
 
 ## Output
 
 ```
-outputs/
-  labeled_dataset.jsonl       ← dataset completo
+phase1/outputs/
+  labeled_dataset.jsonl       ← dataset completo labellato
+  metrics.json                ← accuracy, hallucination rate, timing, per-category stats
   splits/
     train.jsonl               ← 70% stratificato per categoria
     val.jsonl                 ← 15%
     test.jsonl                ← 15%
+  activations/                ← prodotto solo con --capture_activations
+    train/
+      X.npy                   ← float16, shape (N_train, 32, 4096)
+      y.npy                   ← int8,    shape (N_train,)
+      meta.jsonl              ← id, category, hallucination_type per riga
+      shape.json              ← {"X_shape": [N, 32, 4096], "num_layers": 32, ...}
+    val/   (stessa struttura)
+    test/  (stessa struttura)
 ```
+
+`X[i, j, :]` = hidden state dell'ultimo token del prefill, layer `j`, sample `i`.
 
 ### Struttura di ogni record JSONL
 
@@ -158,64 +179,52 @@ outputs/
 | `EXTRA_ARGS` | Argomenti extra non previsti dallo schema |
 | `WRONG_ARG_VALUES` | Argomenti giusti ma valori fuori dal set accettabile |
 | `WRONG_ARG_NAMES` | Nomi degli argomenti errati |
-| `WRONG_CALL_COUNT` | Numero di chiamate errato (categorie parallel/multiple) |
-| `INFERENCE_ERROR` | Errore durante l'inferenza |
+| `WRONG_CALL_COUNT` | Numero di chiamate errato (parallel/multiple) |
+| `INFERENCE_ERROR` | Errore durante l'inferenza (OOM, CUDA) — filtrare prima del training |
 
 ---
 
-## Re-valutazione senza ri-eseguire l'inferenza
+## Note tecniche
 
-Se hai già un `labeled_dataset.jsonl` con gli output del modello e vuoi
-solo modificare la logica di valutazione:
+### Cattura del residual stream
 
-```bash
-python pipeline.py \
-    --data_dir     ./data \
-    --output       ./outputs/labeled_dataset.jsonl \
-    --skip_inference
-```
+Con `--capture_activations` la pipeline registra 32 forward hook (uno per layer)
+durante il prefill. Ogni hook cattura `hidden[0, -1, :]` (ultimo token, float16)
+e lo sposta subito su CPU. Costo VRAM: ~0; costo RAM: ~262 KB per sample.
 
-Il pipeline leggerà i `model_raw_output` già salvati e ricalcolerà i label.
+### Doppia GPU
 
----
+I modelli vengono caricati **sequenzialmente** (bitsandbytes NF4 non è thread-safe).
+Solo l'inferenza gira in parallelo tra le GPU. Usa sempre `--max_seq_len 3072` con
+multi-turn per evitare OOM che corrompono il contesto CUDA.
 
-## Backend alternativo — llama-cpp (GGUF)
+### Bilanciamento delle classi
 
-Per GPU con meno VRAM o CPU-only:
-
-```bash
-# Installa llama-cpp-python con supporto CUDA (se disponibile)
-CMAKE_ARGS="-DLLAMA_CUDA=on" pip install llama-cpp-python
-
-# Scarica il GGUF di Qwen/Qwen3.5-9B Q4_K_M (~4.4 GB)
-hf download Qwen/Qwen3.5-9B-GGUF \
-    qwen3.5-9B-q4_k_m.gguf \
-    --local-dir ./models
-
-# Avvia la pipeline con backend llama_cpp
-python pipeline.py \
-    --backend  llama_cpp \
-    --model    ./models/qwen3.5-9B-q4_k_m.gguf \
-    --total    2000
-```
-
-> Nota: con llama.cpp gli hidden states non sono accessibili direttamente.
-> Per la Fase 2 (cattura del residual stream) è necessario il backend
-> `transformers`.
+Il dataset ha circa l'8% di allucinazioni. Durante il training (Phase 3) si usa
+`pos_weight = n_neg / n_pos` in `BCELoss`. I sample `INFERENCE_ERROR` vanno
+filtrati prima del training perché non hanno hidden state significativi.
 
 ---
 
 ## Struttura del progetto
 
 ```
-phase1/
-  loader.py          ← carica e correla domande + ground truth per ID
-  sampler.py         ← campionamento proporzionale tra categorie
-  evaluator.py       ← valutazione deterministica AST (no LLM-judge)
-  runner.py          ← inferenza Qwen 4-bit + forward hook (Fase 2)
-  pipeline.py        ← orchestratore principale (CLI)
-  test_evaluator.py  ← 25 test unitari sul valutatore
-  requirements.txt
-  data/              ← dataset BFCL (da scaricare)
-  outputs/           ← generato automaticamente
+mcpsuite/
+├── CLAUDE.md              ← contesto completo per Claude Code
+├── README.md              ← questo file
+├── docs/
+│   ├── roadmap.md         ← roadmap dettagliata 4 fasi
+│   ├── phase1_complete.md ← note implementazione Phase 1
+│   ├── phase2_spec.md     ← spec Phase 2 (integrata in Phase 1)
+│   └── data_schema.md     ← schema JSONL e layout dataset BFCL
+└── phase1/
+    ├── loader.py          ← carica e correla domande + ground truth per ID
+    ├── sampler.py         ← campionamento proporzionale tra categorie
+    ├── evaluator.py       ← valutazione deterministica AST (no LLM-judge)
+    ├── runner.py          ← inferenza Qwen 4-bit + 32 forward hook
+    ├── pipeline.py        ← orchestratore CLI (fasi 1-6)
+    ├── test_evaluator.py  ← 25 test unitari (tutti passano)
+    ├── requirements.txt
+    ├── data/              ← dataset BFCL (da scaricare)
+    └── outputs/           ← generato automaticamente
 ```
