@@ -108,6 +108,12 @@ class RunnerConfig:
     # device_map: "auto" | {"": 0} | {"": 1} | ...
     # Per multi-GPU usa run_inference_parallel() che passa {"": gpu_id} automaticamente.
     device_map: str | dict   = "auto"
+    # max_memory: forza la distribuzione del modello su più GPU.
+    # Il cap deve essere ~metà del peso del modello, altrimenti device_map="auto"
+    # mette tutto su GPU 0 (greedy fill).
+    # Qwen3.5-9B NF4 ≈ 6.5 GB → cap consigliato: {0: "3500MiB", 1: "3500MiB"}
+    # → ~16 layer per GPU, ~12.5 GB liberi per KV cache e attivazioni.
+    max_memory: dict | None  = None
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -242,6 +248,8 @@ class TransformersRunner:
             device_map=cfg.device_map,
             trust_remote_code=True,
         )
+        if cfg.max_memory:
+            load_kwargs["max_memory"] = cfg.max_memory
         if cfg.attn_implementation:
             load_kwargs["attn_implementation"] = cfg.attn_implementation
 
