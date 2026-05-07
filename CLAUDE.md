@@ -94,9 +94,11 @@ mcpsuite/
 │           ├── train/          ← X.npy (N,32,4096), y.npy, meta.jsonl, shape.json
 │           ├── val/
 │           └── test/
-└── phase2/                     ← TO BE CREATED (Phase 3 work)
+└── phase3/                     ← Phase 3 — classifier training
     ├── dataset.py              ← PyTorch Dataset over X.npy / y.npy with layer selection
-    └── train.py                ← 32 independent MLP classifiers + AUROC vs layer plot
+    ├── merge_activations.py    ← unisce single-turn e multi-turn (solo train)
+    ├── train.py                ← 32 MLP con k-fold CV + AUROC vs layer plot
+    └── requirements.txt
 ```
 
 ---
@@ -194,15 +196,11 @@ cd phase1 && python pipeline.py --data_dir ./data --total 50
 
 See `docs/roadmap.md` Phase 3 for the full spec. Summary:
 
-1. Create `phase2/dataset.py` — PyTorch `Dataset` that memory-maps `X.npy` and
-   `y.npy`, selects a specific layer by index, and filters `INFERENCE_ERROR` rows.
+Tutti i file sono in `phase3/`. Eseguire in ordine:
 
-2. Create `phase2/train.py` — training loop for 32 independent MLP classifiers:
-   - Input: `X[:, layer_idx, :]` shape `(N, 4096)`
-   - Loss: `BCELoss(pos_weight=n_neg/n_pos)`
-   - Optimizer: `AdamW(lr=1e-3, weight_decay=1e-4)`
-   - Early stopping: patience=10 on val AUROC
-   - Output: `outputs/classifiers/layer_{i:02d}.pt` + `metrics.json` + AUROC plot
+1. `merge_activations.py` — unisce train single-turn + multi-turn; val e test restano solo single-turn
+2. `train.py` — 32 MLP indipendenti con k-fold CV (k=5) sul merged train;
+   valutazione finale sul val single-turn; produce `metrics.json` + `auroc_per_layer.png`
 
 ---
 

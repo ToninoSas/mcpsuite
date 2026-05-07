@@ -121,15 +121,16 @@ nn.Sequential(
 **Key output**: plot of `AUROC vs layer index (0-31)`. The peak layer is
 the candidate for the production guardrail.
 
-**Files to build**:
+**Files** (in `phase3/`):
 ```
-phase2/
-  dataset.py   ← ActivationDataset: memory-maps X.npy, selects layer by index
-  train.py     ← training loop for all 32 layers, saves metrics + plot
+phase3/
+  dataset.py            ← ActivationDataset: memory-maps X.npy, selects layer by index
+  merge_activations.py  ← unisce train single+multi; val/test restano solo single-turn
+  train.py              ← 32 MLP con k-fold CV (k=5) sul merged train + AUROC plot
+  requirements.txt
 ```
 
-**Pre-training step**: filter `INFERENCE_ERROR` from X/y before training.
-See `docs/phase2_spec.md` for the filtering snippet.
+**Pre-training step**: `INFERENCE_ERROR` filtrati automaticamente da `ActivationDataset`.
 
 ---
 
