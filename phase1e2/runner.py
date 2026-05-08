@@ -153,8 +153,11 @@ def build_prompt(sample: BFCLSample) -> list[dict]:
     messages = [build_system_message(sample)]
 
     # sample.question: list[list[dict]] — ogni inner list è un turno
+    # I messaggi system nelle live categories vengono saltati: usiamo il nostro
     for turn in sample.question:
         for msg in turn:
+            if msg.get("role") == "system":
+                continue
             messages.append({
                 "role": msg.get("role", "user"),
                 "content": msg.get("content", ""),
