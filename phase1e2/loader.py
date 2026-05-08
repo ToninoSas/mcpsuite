@@ -97,6 +97,9 @@ SINGLE_TURN_CATEGORIES = [
     "multiple",
     "parallel",
     "parallel_multiple",
+    "live_multiple",
+    "live_parallel",
+    "live_parallel_multiple"
 ]
 
 MULTI_TURN_CATEGORIES = [
