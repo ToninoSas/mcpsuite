@@ -144,6 +144,7 @@ def train_on_tensors(
         "f1":        float(f1_score(labels, preds, zero_division=0)),
         "precision": float(precision_score(labels, preds, zero_division=0)),
         "recall":    float(recall_score(labels, preds, zero_division=0)),
+        "accuracy":  float((preds == labels).mean()),
     }
     return metrics, best_state, best_epoch
 
@@ -166,6 +167,7 @@ def cross_validate(
     """
     skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=seed)
     fold_aurocs      = []
+    fold_accuracies  = []
     fold_best_epochs = []
 
     for tr_idx, vl_idx in skf.split(X.numpy(), y.numpy().astype(int)):
@@ -175,13 +177,17 @@ def cross_validate(
             X_tr, y_tr, X_vl, y_vl, device=device, **train_kwargs
         )
         fold_aurocs.append(metrics["auroc"])
+        fold_accuracies.append(metrics["accuracy"])
         fold_best_epochs.append(best_epoch)
 
     return {
-        "cv_auroc_mean": float(np.mean(fold_aurocs)),
-        "cv_auroc_std":  float(np.std(fold_aurocs)),
-        "fold_aurocs":   fold_aurocs,
-        "mean_epochs":   int(np.mean(fold_best_epochs)),
+        "cv_auroc_mean":     float(np.mean(fold_aurocs)),
+        "cv_auroc_std":      float(np.std(fold_aurocs)),
+        "fold_aurocs":       fold_aurocs,
+        "cv_accuracy_mean":  float(np.mean(fold_accuracies)),
+        "cv_accuracy_std":   float(np.std(fold_accuracies)),
+        "fold_accuracies":   fold_accuracies,
+        "mean_epochs":       int(np.mean(fold_best_epochs)),
     }
 
 
@@ -271,13 +277,16 @@ def train_one_layer(
     torch.save(final_state, out_dir / f"layer_{layer_idx:02d}.pt")
 
     return {
-        "layer":         layer_idx,
-        "cv_auroc_mean": cv["cv_auroc_mean"],
-        "cv_auroc_std":  cv["cv_auroc_std"],
-        "fold_aurocs":   cv["fold_aurocs"],
-        "mean_epochs":   cv["mean_epochs"],
-        "n_cv_pool":     len(y_cv),
-        "pos_cv_pool":   int(y_cv.sum().item()),
+        "layer":              layer_idx,
+        "cv_auroc_mean":      cv["cv_auroc_mean"],
+        "cv_auroc_std":       cv["cv_auroc_std"],
+        "fold_aurocs":        cv["fold_aurocs"],
+        "cv_accuracy_mean":   cv["cv_accuracy_mean"],
+        "cv_accuracy_std":    cv["cv_accuracy_std"],
+        "fold_accuracies":    cv["fold_accuracies"],
+        "mean_epochs":        cv["mean_epochs"],
+        "n_cv_pool":          len(y_cv),
+        "pos_cv_pool":        int(y_cv.sum().item()),
     }
 
 
@@ -285,7 +294,7 @@ def train_one_layer(
 # Plot
 # ─────────────────────────────────────────────────────────────────────────────
 
-def plot_auroc(layer_metrics: list[dict], out_path: Path) -> None:
+def plot_layer_metrics(layer_metrics: list[dict], out_path: Path) -> None:
     try:
         import matplotlib
         matplotlib.use("Agg")
@@ -294,35 +303,58 @@ def plot_auroc(layer_metrics: list[dict], out_path: Path) -> None:
         print("[plot] matplotlib non disponibile — salto")
         return
 
-    layers   = [m["layer"]         for m in layer_metrics]
-    cv_means = [m["cv_auroc_mean"] for m in layer_metrics]
-    cv_stds  = [m["cv_auroc_std"]  for m in layer_metrics]
-    best_idx = int(np.argmax(cv_means))
+    layers    = [m["layer"]              for m in layer_metrics]
+    cv_means  = [m["cv_auroc_mean"]      for m in layer_metrics]
+    cv_stds   = [m["cv_auroc_std"]       for m in layer_metrics]
+    acc_means = [m["cv_accuracy_mean"]   for m in layer_metrics]
+    acc_stds  = [m["cv_accuracy_std"]    for m in layer_metrics]
+    best_idx  = int(np.argmax(cv_means))
 
-    fig, ax = plt.subplots(figsize=(12, 5))
+    # baseline accuracy = maggioranza (% negativi)
+    n_pos = layer_metrics[0]["pos_cv_pool"]
+    n_tot = layer_metrics[0]["n_cv_pool"]
+    majority_acc = (n_tot - n_pos) / n_tot
 
-    ax.errorbar(
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13, 9), sharex=True)
+
+    # ── subplot 1: AUROC ─────────────────────────────────────────────────────
+    ax1.errorbar(
         layers, cv_means, yerr=cv_stds,
         fmt="o-", linewidth=1.5, markersize=4,
         color="steelblue", ecolor="lightsteelblue", elinewidth=1.5, capsize=3,
-        label="CV AUROC mean ± std (85% pool)",
+        label="CV AUROC mean ± std",
     )
-    ax.axhline(0.5, color="gray", linestyle=":", linewidth=1, label="random baseline")
-    ax.axvline(
+    ax1.axhline(0.5, color="gray", linestyle=":", linewidth=1, label="random baseline (0.5)")
+    ax1.axvline(
         layers[best_idx], color="tomato", linestyle="--", linewidth=1.2,
-        label=f"best layer {layers[best_idx]}  "
-              f"(CV={cv_means[best_idx]:.3f}±{cv_stds[best_idx]:.3f})",
+        label=f"best layer {layers[best_idx]} (AUROC={cv_means[best_idx]:.3f}±{cv_stds[best_idx]:.3f})",
     )
-    ax.scatter([layers[best_idx]], [cv_means[best_idx]],
-               color="tomato", zorder=5, s=70)
+    ax1.scatter([layers[best_idx]], [cv_means[best_idx]], color="tomato", zorder=5, s=70)
+    ax1.set_ylabel("AUROC")
+    ax1.set_ylim(0.4, 1.0)
+    ax1.legend(fontsize=9)
+    ax1.grid(True, alpha=0.3)
 
-    ax.set_xlabel("Layer index")
-    ax.set_ylabel("AUROC")
-    ax.set_title("Hallucination probe — AUROC per transformer layer")
-    ax.set_xticks(layers)
-    ax.set_ylim(0.4, 1.0)
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
+    # ── subplot 2: Accuracy ──────────────────────────────────────────────────
+    ax2.errorbar(
+        layers, acc_means, yerr=acc_stds,
+        fmt="s-", linewidth=1.5, markersize=4,
+        color="seagreen", ecolor="lightgreen", elinewidth=1.5, capsize=3,
+        label="CV Accuracy mean ± std",
+    )
+    ax2.axhline(
+        majority_acc, color="gray", linestyle=":", linewidth=1,
+        label=f"majority baseline ({majority_acc:.2f})",
+    )
+    ax2.axvline(layers[best_idx], color="tomato", linestyle="--", linewidth=1.2)
+    ax2.set_xlabel("Layer index")
+    ax2.set_ylabel("Accuracy")
+    ax2.set_ylim(0.4, 1.0)
+    ax2.legend(fontsize=9)
+    ax2.grid(True, alpha=0.3)
+
+    fig.suptitle("Hallucination probe — AUROC e Accuracy per transformer layer", fontsize=12)
+    ax1.set_xticks(layers)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150)
     plt.close(fig)
@@ -391,22 +423,26 @@ def main() -> None:
     with open(out_dir / "metrics.json", "w") as f:
         json.dump(all_metrics, f, indent=2)
 
-    print(f"\n{'Layer':>6}  {'CV AUROC':>10}  {'±std':>6}  {'Epochs':>6}")
-    print("─" * 38)
+    print(f"\n{'Layer':>6}  {'CV AUROC':>10}  {'±std':>6}  {'CV Acc':>8}  {'±std':>6}  {'Epochs':>6}")
+    print("─" * 56)
     for m in all_metrics:
         print(
             f"  {m['layer']:>4}   {m['cv_auroc_mean']:>8.4f}  "
-            f"{m['cv_auroc_std']:>6.4f}  {m['mean_epochs']:>6}"
+            f"{m['cv_auroc_std']:>6.4f}  "
+            f"{m['cv_accuracy_mean']:>6.4f}  "
+            f"{m['cv_accuracy_std']:>6.4f}  "
+            f"{m['mean_epochs']:>6}"
         )
 
     best = max(all_metrics, key=lambda x: x["cv_auroc_mean"])
     print(f"\nBest layer: {best['layer']}  "
-          f"CV={best['cv_auroc_mean']:.4f}±{best['cv_auroc_std']:.4f}  "
+          f"AUROC={best['cv_auroc_mean']:.4f}±{best['cv_auroc_std']:.4f}  "
+          f"Acc={best['cv_accuracy_mean']:.4f}±{best['cv_accuracy_std']:.4f}  "
           f"epochs={best['mean_epochs']}")
     print(f"Tempo totale: {(time.time()-t_start)/60:.1f} min")
 
     if len(all_metrics) > 1:
-        plot_auroc(all_metrics, out_dir / "auroc_per_layer.png")
+        plot_layer_metrics(all_metrics, out_dir / "metrics_per_layer.png")
 
 
 if __name__ == "__main__":
