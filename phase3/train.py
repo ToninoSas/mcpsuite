@@ -86,7 +86,7 @@ def train_on_tensors(
     )
 
     model     = build_classifier(hidden_size=X_train.shape[1]).to(device)
-    criterion = nn.BCELoss(reduction="mean")
+    criterion = nn.BCELoss(reduction="none")
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     best_auroc = -1.0
@@ -218,7 +218,7 @@ def train_final_model(
     )
 
     model     = build_classifier(hidden_size=X.shape[1]).to(device)
-    criterion = nn.BCELoss(reduction="mean")
+    criterion = nn.BCELoss(reduction="none")
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
 
     for _ in range(n_epochs):
