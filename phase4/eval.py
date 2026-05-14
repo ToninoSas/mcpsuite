@@ -315,6 +315,57 @@ def eval_layer(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Plot riassuntivo — tutte le metriche per layer
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_summary(all_results: list[dict], out_path: Path) -> None:
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[plot] matplotlib non disponibile — salto")
+        return
+
+    layers    = [r["layer"]                    for r in all_results]
+    auroc     = [r["metrics"]["auroc"]         for r in all_results]
+    auprc     = [r["metrics"]["auprc"]         for r in all_results]
+    recall    = [r["metrics"]["recall"]        for r in all_results]
+    precision = [r["metrics"]["precision"]     for r in all_results]
+    accuracy  = [r["metrics"]["accuracy"]      for r in all_results]
+    auroc_lo  = [r["metrics"]["auroc_ci_95"][0] for r in all_results]
+    auroc_hi  = [r["metrics"]["auroc_ci_95"][1] for r in all_results]
+
+    best_idx = int(np.argmax(auroc))
+
+    fig, ax = plt.subplots(figsize=(15, 6))
+
+    ax.plot(layers, auroc,     "o-", color="steelblue",   linewidth=2, markersize=4, label="AUROC")
+    ax.fill_between(layers, auroc_lo, auroc_hi, color="steelblue", alpha=0.12, label="AUROC 95% CI")
+    ax.plot(layers, auprc,     "s-", color="darkorange",  linewidth=2, markersize=4, label="AUPRC")
+    ax.plot(layers, recall,    "^-", color="tomato",      linewidth=2, markersize=4, label="Recall")
+    ax.plot(layers, precision, "D-", color="seagreen",    linewidth=2, markersize=4, label="Precision")
+    ax.plot(layers, accuracy,  "v-", color="mediumpurple", linewidth=2, markersize=4, label="Accuracy")
+
+    ax.axvline(layers[best_idx], color="gray", linestyle="--", linewidth=1.2,
+               label=f"best layer {layers[best_idx]} (AUROC={auroc[best_idx]:.3f})")
+    ax.axhline(0.5, color="black", linestyle=":", linewidth=1, alpha=0.4, label="baseline 0.5")
+
+    ax.set_xlabel("Layer index", fontsize=11)
+    ax.set_ylabel("Valore metrica", fontsize=11)
+    ax.set_title("Phase 4 — Metriche per layer sul test set", fontsize=12)
+    ax.set_xticks(layers)
+    ax.set_ylim(0.0, 1.05)
+    ax.legend(fontsize=9, loc="lower right")
+    ax.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"[plot] summary salvato → {out_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -387,6 +438,7 @@ def main() -> None:
         print(f"\nBest layer: {best['layer']}  "
               f"AUROC={best['metrics']['auroc']:.4f}  "
               f"F1={best['metrics']['f1']:.4f}")
+        plot_summary(all_results, out_dir / "summary.png")
 
     print(f"\nRisultati salvati in {out_dir}/")
 
