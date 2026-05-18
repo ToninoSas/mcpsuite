@@ -327,25 +327,19 @@ def plot_summary(all_results: list[dict], out_path: Path) -> None:
         print("[plot] matplotlib non disponibile — salto")
         return
 
-    layers    = [r["layer"]                    for r in all_results]
-    auroc     = [r["metrics"]["auroc"]         for r in all_results]
-    auprc     = [r["metrics"]["auprc"]         for r in all_results]
-    recall    = [r["metrics"]["recall"]        for r in all_results]
-    precision = [r["metrics"]["precision"]     for r in all_results]
-    accuracy  = [r["metrics"]["accuracy"]      for r in all_results]
-    auroc_lo  = [r["metrics"]["auroc_ci_95"][0] for r in all_results]
-    auroc_hi  = [r["metrics"]["auroc_ci_95"][1] for r in all_results]
+    layers   = [r["layer"]                     for r in all_results]
+    auroc    = [r["metrics"]["auroc"]          for r in all_results]
+    f1       = [r["metrics"]["f1"]             for r in all_results]
+    auroc_lo = [r["metrics"]["auroc_ci_95"][0] for r in all_results]
+    auroc_hi = [r["metrics"]["auroc_ci_95"][1] for r in all_results]
 
     best_idx = int(np.argmax(auroc))
 
     fig, ax = plt.subplots(figsize=(15, 6))
 
-    ax.plot(layers, auroc,     "o-", color="steelblue",   linewidth=2, markersize=4, label="AUROC")
+    ax.plot(layers, auroc, "o-", color="steelblue",  linewidth=2, markersize=4, label="AUROC")
     ax.fill_between(layers, auroc_lo, auroc_hi, color="steelblue", alpha=0.12, label="AUROC 95% CI")
-    ax.plot(layers, auprc,     "s-", color="darkorange",  linewidth=2, markersize=4, label="AUPRC")
-    ax.plot(layers, recall,    "^-", color="tomato",      linewidth=2, markersize=4, label="Recall")
-    ax.plot(layers, precision, "D-", color="seagreen",    linewidth=2, markersize=4, label="Precision")
-    ax.plot(layers, accuracy,  "v-", color="mediumpurple", linewidth=2, markersize=4, label="Accuracy")
+    ax.plot(layers, f1,    "s-", color="darkorange", linewidth=2, markersize=4, label="F1")
 
     ax.axvline(layers[best_idx], color="gray", linestyle="--", linewidth=1.2,
                label=f"best layer {layers[best_idx]} (AUROC={auroc[best_idx]:.3f})")
