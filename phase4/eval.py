@@ -110,6 +110,9 @@ def bootstrap_ci(
         y, p = labels[idx], probs[idx]
         if 0 < y.sum() < len(y):
             scores.append(metric_fn(y, p))
+    if not scores:
+        point = float(metric_fn(labels, probs)) if 0 < labels.sum() < len(labels) else 0.5
+        return point, point
     lo = float(np.percentile(scores, 100 * alpha / 2))
     hi = float(np.percentile(scores, 100 * (1 - alpha / 2)))
     return lo, hi
