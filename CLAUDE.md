@@ -46,9 +46,12 @@ Input: hidden state of layer i, last token → R^4096
   └─ Sigmoid()
 
 Output: scalar in [0, 1]  (probability of hallucination)
-Loss:   BCELoss with pos_weight = n_neg / n_pos  (class imbalance)
+Loss:   BCELoss(reduction="none") with pos_weight = n_neg / n_pos  (class imbalance)
 Optim:  AdamW(lr=1e-3, weight_decay=1e-4)
 ```
+
+**Important**: `BCELoss` must use `reduction="none"` so per-sample weights are applied
+before averaging. Using `reduction="mean"` silently ignores the `pos_weight`.
 
 ---
 
@@ -58,12 +61,26 @@ Optim:  AdamW(lr=1e-3, weight_decay=1e-4)
 |---|---|---|
 | Phase 1 — Test Suite, Dataset & Activation Capture | ✅ Complete | `outputs/labeled_dataset.jsonl`, `outputs/activations/` |
 | Phase 2 — Residual Stream Capture | ✅ Merged into Phase 1 | handled by `pipeline.py --capture_activations` |
-| Phase 3 — Per-Layer Classifier Training | 🔲 Next | `outputs/classifiers/` |
-| Phase 4 — Eval & Guardrail | 🔲 Pending | inference wrapper |
+| Phase 3 — Per-Layer Classifier Training | ✅ Complete | `classifiers_*/`, `metrics.json`, `metrics_per_layer.png` |
+| Phase 4 — Eval & Guardrail | ✅ Complete | `eval_results*/`, `results.json`, `summary.png` |
 
-**Phases 1 and 2 are complete.** `pipeline.py --capture_activations` produces both
-the labeled dataset and `X.npy (N, 32, 4096)` activations in a single pass.
-The next task is Phase 3: train 32 independent MLP classifiers and plot AUROC vs layer.
+**Tutte le fasi sono complete.**
+
+### Risultati chiave (Phase 4)
+
+| Esperimento | Test set | Best layer | AUROC | F1 |
+|---|---|---|---|---|
+| Single-turn classifier (1494 campioni) | Single-turn | 30 (test) / 13 (CV) | 0.831 | 0.463 |
+| Mixed classifier (1494 single + 600 multi) | Mixed | 23 | 0.961 | 0.907 |
+| Mixed classifier | Single-turn | 23 | 0.827 | 0.500 |
+
+**Finding principale**: AUROC ~0.83 è il segnale genuino di allucinazione nel residual
+stream, indipendente dal training set. Layer 23 è il layer ottimale stabile attraverso
+esperimenti e distribuzioni di dati diverse.
+
+Il mixed classifier su test mixed (0.96) è inflazionato da un confound strutturale
+(single-turn vs multi-turn ha distribuzione di label opposta). Il risultato scientifico
+rilevante è AUROC 0.83 su test single-turn.
 
 ---
 
@@ -77,29 +94,44 @@ mcpsuite/
 │   ├── phase1_complete.md      ← Phase 1 implementation notes + schema
 │   ├── phase2_spec.md          ← Phase 2 spec (merged into Phase 1)
 │   └── data_schema.md          ← JSONL schema + BFCL dataset layout
-├── phase1/
-│   ├── loader.py               ← loads BFCL, correlates Q + GT by id
-│   ├── sampler.py              ← proportional sampling across categories
-│   ├── evaluator.py            ← deterministic AST evaluator (no LLM judge)
+├── phase1e2/                   ← inferenza single-turn + live tasks
 │   ├── runner.py               ← Qwen 4-bit inference + 32-layer forward hooks
-│   ├── pipeline.py             ← CLI orchestrator (phases 1-6 incl. activation save)
-│   ├── test_evaluator.py       ← 25 unit tests (all passing)
-│   ├── requirements.txt
-│   ├── data/                   ← BFCL dataset (downloaded separately)
-│   └── outputs/
-│       ├── labeled_dataset.jsonl
-│       ├── metrics.json
-│       ├── splits/             ← train/val/test.jsonl
-│       └── activations/
-│           ├── train/          ← X.npy (N,32,4096), y.npy, meta.jsonl, shape.json
-│           ├── val/
-│           └── test/
-└── phase3/                     ← Phase 3 — classifier training
-    ├── dataset.py              ← PyTorch Dataset over X.npy / y.npy with layer selection
-    ├── merge_activations.py    ← unisce single-turn e multi-turn (solo train)
-    ├── train.py                ← 32 MLP con k-fold CV + AUROC vs layer plot
+│   │                             (fix: skip system messages nei turni live)
+│   └── pipeline.py             ← CLI orchestrator
+├── outputs/
+│   ├── single_turn/            ← 1000 campioni (simple, multiple, parallel, parallel_multiple)
+│   │   ├── labeled_dataset.jsonl
+│   │   ├── metrics.json
+│   │   ├── splits/
+│   │   └── activations/train/ val/ test/
+│   ├── single_turn2/           ← 494 campioni live (live_multiple, live_parallel,
+│   │   └── ...                    live_parallel_multiple)
+│   ├── single_turn_merged/     ← merge di single_turn + single_turn2
+│   │   ├── metrics.json        ← 1494 campioni totali, 11.7% hallucination rate
+│   │   └── activations/train/ val/ test/
+│   └── multi_turn/             ← 600 campioni multi-turn
+│       └── ...
+└── phase3/                     ← training classificatori
+    ├── dataset.py              ← ActivationDataset: memory-map X.npy, selezione layer
+    ├── merge_activations.py    ← merge train/val/test da due sorgenti + merge metrics.json
+    ├── train.py                ← 32 MLP con 5-fold StratifiedKFold CV + plot
+    ├── plot_comparison.py      ← confronto AUROC+Accuracy tra due esperimenti
     └── requirements.txt
+└── phase4/
+    └── eval.py                 ← valutazione test set: AUROC, F1, bootstrap CI,
+                                   soglia Youden, breakdown per categoria, plot summary
 ```
+
+---
+
+## Datasets
+
+| Directory | Campioni | Categorie | Halluc. rate |
+|---|---|---|---|
+| `outputs/single_turn/` | 1000 | simple, multiple, parallel, parallel_multiple | 8.3% |
+| `outputs/single_turn2/` | 494 | live_multiple, live_parallel, live_parallel_multiple | ~18% |
+| `outputs/single_turn_merged/` | 1494 | tutte le sopra | 11.7% |
+| `outputs/multi_turn/` | 600 | multi_turn_base, miss_func, miss_param, composite | ~99% |
 
 ---
 
@@ -129,17 +161,30 @@ information-dense position for predicting what the model will generate next.
 AUROC vs layer index identifies the most discriminative layer. The best-layer
 classifier is the candidate for the production guardrail.
 
-**Class imbalance.** Dataset is ~8% hallucinations. Use
-`pos_weight = n_neg / n_pos` in `BCELoss`. Do not oversample.
+**Class imbalance.** Dataset è ~8-12% hallucinations (single-turn). Use
+`pos_weight = n_neg / n_pos` in `BCELoss(reduction="none")`. Do not oversample.
 
-**Proportional sampling across BFCL categories.** Multi-turn categories
-(`miss_func`, `miss_param`) have higher hallucination rates by design and are
-included to increase positive samples. `multi_turn_long_context` is excluded
-(too long even with truncation). Recommended weights: see `docs/roadmap.md`.
+**CV pool = 85%, test = 15% held-out.** train (70%) + val (15%) concatenati
+formano il CV pool per 5-fold StratifiedKFold. Il test set non viene mai toccato
+fino a Phase 4.
+
+**Confound multi-turn.** Il dataset multi-turn ha ~99% allucinazioni. Addestrare
+su single+multi dà AUROC artificialmente alto (~0.96) perché il classificatore
+impara la distinzione strutturale, non il segnale di allucinazione. Usare il
+test set single-turn per misurare il segnale genuino.
+
+**Live categories — fix system message.** Le categorie live (live_multiple,
+live_parallel, live_parallel_multiple) incorporano un system message nei turni
+della domanda. `build_prompt()` in `runner.py` deve saltare questi messaggi
+system interni per evitare duplicati. Fix applicato.
 
 **`max_seq_len=3072` required on Kaggle T4.** Long multi-turn sequences (8000+
 tokens) cause OOM during bitsandbytes dequant kernels, which corrupts the CUDA
 context (`cudaErrorIllegalAddress` cascade). Truncating to 3072 prevents OOM.
+
+**Single GPU per live categories.** Le live tasks hanno prompt 2-5x più lunghi
+degli standard single-turn. Con `num_gpus=2` i picchi di memoria (11 GB) causano
+CUDA illegal memory access. Usare `num_gpus=1` (8.3 GB, stabile).
 
 **`attn_implementation="sdpa"`.** Reduces attention memory from O(n²) to O(n)
 using PyTorch's built-in SDPA kernel. No extra packages required.
@@ -153,54 +198,64 @@ only inference runs in parallel threads.
 ## Commands
 
 ```bash
-# Install deps (from phase1/)
+# Install deps (from phase1e2/)
 pip install -r requirements.txt
 
 # Download BFCL dataset
 huggingface-cli download gorilla-llm/Berkeley-Function-Calling-Leaderboard \
-    --repo-type dataset --local-dir ./phase1/data
+    --repo-type dataset --local-dir ./data
 
 # Run unit tests (no GPU needed)
-cd phase1 && python -m pytest test_evaluator.py -v
+cd phase1e2 && python -m pytest test_evaluator.py -v
 
-# Recommended full run (Kaggle T4 × 2, ~2000 samples, activations included)
-cd phase1 && python pipeline.py \
+# Single-turn inference (simple/multiple/parallel/parallel_multiple)
+cd phase1e2 && python pipeline.py \
     --data_dir ./data \
-    --output   ./outputs/labeled_dataset.jsonl \
-    --total    2000 \
+    --output   ../outputs/single_turn/labeled_dataset.jsonl \
+    --total    1000 \
     --num_gpus 2 \
     --max_seq_len 3072 \
     --capture_activations \
-    --weights '{"simple":0.20,"multiple":0.15,"parallel":0.10,
-                "parallel_multiple":0.05,"multi_turn_base":0.15,
-                "multi_turn_miss_func":0.15,"multi_turn_miss_param":0.15,
-                "multi_turn_long_context":0.0,"multi_turn_composite":0.05}'
+    --weights '{"simple":0.40,"multiple":0.20,"parallel":0.20,"parallel_multiple":0.20}'
 
-# Quick smoke test (50 samples, no activations, single GPU)
-cd phase1 && python pipeline.py --data_dir ./data --total 50
+# Live tasks inference (num_gpus=1 obbligatorio per stabilità memoria)
+cd phase1e2 && python pipeline.py \
+    --data_dir ./data \
+    --output   ../outputs/single_turn2/labeled_dataset.jsonl \
+    --total    500 \
+    --num_gpus 1 \
+    --max_seq_len 2048 \
+    --capture_activations \
+    --weights '{"live_multiple":0.70,"live_parallel":0.15,"live_parallel_multiple":0.15}'
+
+# Merge attivazioni + metriche
+cd phase3 && python merge_activations.py \
+    --src_a  ../outputs/single_turn/activations \
+    --src_b  ../outputs/single_turn2/activations \
+    --out    ../outputs/single_turn_merged/activations \
+    --metrics_a   ../outputs/single_turn/metrics.json \
+    --metrics_b   ../outputs/single_turn2/metrics.json \
+    --metrics_out ../outputs/single_turn_merged/metrics.json
+
+# Training classificatori (single-turn)
+cd phase3 && python train.py \
+    --activations_dir ../outputs/single_turn_merged/activations \
+    --out_dir         classifiers_single \
+    --device          cuda
+
+# Valutazione Phase 4 (best layer o tutti)
+cd phase4 && python eval.py \
+    --activations_dir ../outputs/single_turn_merged/activations \
+    --classifiers_dir ../phase3/classifiers_single \
+    --out_dir         eval_results_single \
+    --layer           23
+
+# Confronto due esperimenti
+cd phase3 && python plot_comparison.py \
+    --metrics_a classifiers_single/metrics.json   --label_a "Single-turn" \
+    --metrics_b classifiers_mixed/metrics.json    --label_b "Mixed" \
+    --out       comparison.png
 ```
-
-### New CLI flags added to pipeline.py
-
-| Flag | Description |
-|---|---|
-| `--capture_activations` | Capture 32-layer hidden states and save X.npy / y.npy |
-| `--max_seq_len N` | Truncate input to last N tokens (use 3072 on T4 16 GB) |
-| `--num_gpus N` | Data-parallel inference across N GPUs |
-| `--weights '{...}'` | Per-category sampling weights as JSON string |
-| `--no_multi_turn` | Zero-weight all multi-turn categories (quick single-turn run) |
-
----
-
-## What to build next — Phase 3
-
-See `docs/roadmap.md` Phase 3 for the full spec. Summary:
-
-Tutti i file sono in `phase3/`. Eseguire in ordine:
-
-1. `merge_activations.py` — unisce train single-turn + multi-turn; val e test restano solo single-turn
-2. `train.py` — 32 MLP indipendenti con k-fold CV (k=5) sul merged train;
-   valutazione finale sul val single-turn; produce `metrics.json` + `auroc_per_layer.png`
 
 ---
 
@@ -210,9 +265,9 @@ Tutti i file sono in `phase3/`. Eseguire in ordine:
 - **Question files**: `data/BFCL_v3_{category}.json` — one JSON object per line
 - **Ground truth files**: `data/possible_answer/BFCL_v3_{category}.json`
 - **Correlation key**: `id` field (e.g. `"simple_42"`, `"multi_turn_base_7"`)
-- **Categories used**: simple, multiple, parallel, parallel_multiple,
-  multi_turn_base, multi_turn_miss_func, multi_turn_miss_param,
-  multi_turn_composite
+- **Categories usate**: simple, multiple, parallel, parallel_multiple,
+  live_multiple, live_parallel, live_parallel_multiple,
+  multi_turn_base, multi_turn_miss_func, multi_turn_miss_param, multi_turn_composite
 - **Excluded**: `multi_turn_long_context` (too long even with max_seq_len=3072)
 
 See `docs/data_schema.md` for full field-by-field breakdown.
