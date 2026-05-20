@@ -4,17 +4,26 @@ pipeline.py — Orchestratore Fase 1
 Flusso completo:
   1. Carica il corpus BFCL da disco
   2. Campionamento proporzionale
-  3. Inferenza con Qwen 4-bit
+  3. Inferenza con modello 4-bit (Qwen o Llama)
   4. Valutazione deterministica (AST)
   5. Salvataggio del dataset labellato in JSONL
 
 Uso:
+  # Qwen (default)
   python pipeline.py \
     --data_dir  ./data \
-    --output    ./outputs/labeled_dataset.jsonl \
-    --total     2000 \
-    --backend   transformers \
-    --model     Qwen/Qwen2.5-7B-Instruct
+    --output    ./outputs/qwen_single_turn/labeled_dataset.jsonl \
+    --total     1000 \
+    --model     Qwen/Qwen3.5-9B \
+    --capture_activations
+
+  # Llama
+  python pipeline.py \
+    --data_dir  ./data \
+    --output    ./outputs/llama_single_turn/labeled_dataset.jsonl \
+    --total     1000 \
+    --model     meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --capture_activations
 """
 
 from __future__ import annotations
@@ -111,8 +120,9 @@ def run_pipeline(
     # ── 3. Inferenza ──────────────────────────────────────────────────────────
     t0 = time.time()
     if not skip_inference:
+        model_label = runner_config.model_name_or_path.split("/")[-1]
         print("\n" + "═" * 60)
-        print("FASE 1.3 — Inferenza Qwen 4-bit")
+        print(f"FASE 1.3 — Inferenza {model_label} 4-bit")
         print("═" * 60)
         if capture_activations:
             print("[pipeline] capture_activations=True — hidden state catturato durante l'inferenza")
@@ -287,6 +297,7 @@ def run_pipeline(
                     for m in meta:
                         f.write(json.dumps(m, ensure_ascii=False) + "\n")
                 shape_info = {
+                    "model":       runner_config.model_name_or_path,
                     "X_shape":     list(X_arr.shape),
                     "X_dtype":     "float16",
                     "y_dtype":     "int8",
@@ -365,6 +376,7 @@ def run_pipeline(
 
     # ── Salvataggio metrics.json ──────────────────────────────────────────────
     metrics = {
+        "model":             runner_config.model_name_or_path,
         "total":             total_labeled,
         "n_correct":         n_correct,
         "n_halluc":          n_halluc,
@@ -409,7 +421,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--data_dir",        default="./data",           help="Cartella BFCL")
     p.add_argument("--output",          default="./outputs/labeled_dataset.jsonl")
     p.add_argument("--total",           type=int, default=2000,     help="Sample totali")
-    p.add_argument("--model",           default="Qwen/Qwen3.5-9B")
+    p.add_argument("--model",           default="Qwen/Qwen3.5-9B",
+                   help="HuggingFace model ID. Es: Qwen/Qwen3.5-9B o meta-llama/Meta-Llama-3.1-8B-Instruct")
     p.add_argument("--backend",         default="transformers",     choices=["transformers", "llama_cpp"])
     p.add_argument("--max_new_tokens",  type=int, default=512)
     p.add_argument("--max_seq_len",     type=int, default=None,

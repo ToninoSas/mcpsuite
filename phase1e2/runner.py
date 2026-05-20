@@ -1,15 +1,17 @@
 """
-runner.py — Esecuzione inferenza su Qwen 4-bit quantizzato
+runner.py — Inferenza 4-bit su modelli HuggingFace per il probing del residual stream
 
-Usa transformers + bitsandbytes (BitsAndBytes NF4/INT4) oppure
-llama-cpp-python (GGUF) in base alla configurazione.
+Supporta qualsiasi modello con architettura transformer decoder caricabile via
+AutoModelForCausalLM. Testato su:
+  - Qwen/Qwen3.5-9B          (32 layer, hidden=4096)
+  - meta-llama/Meta-Llama-3.1-8B-Instruct  (32 layer, hidden=4096)
 
-Il prompt viene formattato secondo il template Qwen2.5/Qwen3:
-  - Il system prompt include i function schema in formato OpenAI
-  - Il modello risponde con una <tool_call> oppure con testo
+Il system prompt include gli schemi delle funzioni e istruisce il modello a
+rispondere con <tool_call>. Il formato è esplicito e segue le istruzioni
+indipendentemente dal template nativo del modello.
 
-Per il residual stream capture (Fase 2), questo runner registrerà
-anche forward hooks — per ora si limita a raccogliere l'output grezzo.
+Per il residual stream capture registra forward hook su tutti i transformer
+block, catturando hidden[0, -1, :] (last token del prefill) per ogni layer.
 """
 
 from __future__ import annotations
@@ -21,6 +23,26 @@ from pathlib import Path
 from typing import Any
 
 from loader import BFCLSample
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Model registry
+# ─────────────────────────────────────────────────────────────────────────────
+
+MODEL_CONFIGS: dict[str, dict] = {
+    "qwen": {
+        "model_id":    "Qwen/Qwen3.5-9B",
+        "n_layers":    32,
+        "hidden_size": 4096,
+        "notes":       "Qwen3 thinking mode disabled via enable_thinking=False",
+    },
+    "llama": {
+        "model_id":    "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "n_layers":    32,
+        "hidden_size": 4096,
+        "notes":       "Same layer/hidden layout as Qwen — classifier unchanged",
+    },
+}
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -216,8 +238,11 @@ def run_multi_turn_inference(
 
 class TransformersRunner:
     """
-    Carica Qwen con bitsandbytes 4-bit e genera le risposte.
-    Predisposto per il forward-hook della Fase 2.
+    Carica un modello HuggingFace con bitsandbytes 4-bit NF4 e genera le risposte.
+    Supporta il forward-hook sul residual stream (generate_with_hidden_state).
+
+    Funziona per qualsiasi architettura con model.model.layers (Llama, Qwen,
+    Mistral, ecc.) — il numero di layer e hidden_size vengono letti dinamicamente.
     """
 
     def __init__(self, config: RunnerConfig):
