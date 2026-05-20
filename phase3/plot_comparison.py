@@ -17,7 +17,9 @@ from pathlib import Path
 
 
 def load_metrics(path: str) -> list[dict]:
-    return json.loads(Path(path).read_text())
+    data = json.loads(Path(path).read_text())
+    # metrics.json può essere una lista (formato vecchio) o {"seed":..., "layers":[...]}
+    return data["layers"] if isinstance(data, dict) else data
 
 
 def plot_comparison(

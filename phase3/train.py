@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import random
 import time
 from pathlib import Path
 
@@ -35,6 +36,18 @@ from sklearn.model_selection import StratifiedKFold
 from torch.utils.data import DataLoader, TensorDataset
 
 from dataset import ActivationDataset
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Seed
+# ─────────────────────────────────────────────────────────────────────────────
+
+def set_seed(seed: int) -> None:
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -250,7 +263,12 @@ def train_one_layer(
     lr:              float = 1e-3,
     weight_decay:    float = 1e-4,
     device:          str   = "cpu",
+    seed:            int   = 42,
 ) -> dict:
+    # Seed per-layer: layer X produce sempre lo stesso modello indipendentemente
+    # dall'ordine in cui i layer vengono addestrati.
+    set_seed(seed + layer_idx)
+
     # CV pool = train (70%) + val (15%) = 85%
     train_ds = ActivationDataset(activations_dir / "train", layer=layer_idx)
     val_ds   = ActivationDataset(activations_dir / "val",   layer=layer_idx)
@@ -376,7 +394,10 @@ def main() -> None:
     parser.add_argument("--batch_size", type=int,   default=256)
     parser.add_argument("--lr",         type=float, default=1e-3)
     parser.add_argument("--device",     default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument("--seed",       type=int, default=42, help="Seed globale per riproducibilità")
     args = parser.parse_args()
+
+    set_seed(args.seed)
 
     activations_dir = Path(args.activations_dir)
     out_dir         = Path(args.out_dir)
@@ -387,6 +408,7 @@ def main() -> None:
     layers_to_train = args.layers if args.layers else list(range(num_layers))
 
     print(f"Device    : {args.device}")
+    print(f"Seed      : {args.seed}")
     print(f"Layers    : {layers_to_train}")
     print(f"CV folds  : {args.k_folds}")
     print(f"CV pool   : train (70%) + val (15%) = 85%  [test 15% intoccato fino a Phase 4]")
@@ -409,6 +431,7 @@ def main() -> None:
             batch_size=args.batch_size,
             lr=args.lr,
             device=args.device,
+            seed=args.seed,
         )
         elapsed = time.time() - t0
         print(
@@ -420,8 +443,9 @@ def main() -> None:
 
     all_metrics.sort(key=lambda x: x["layer"])
 
+    output = {"seed": args.seed, "layers": all_metrics}
     with open(out_dir / "metrics.json", "w") as f:
-        json.dump(all_metrics, f, indent=2)
+        json.dump(output, f, indent=2)
 
     print(f"\n{'Layer':>6}  {'CV AUROC':>10}  {'±std':>6}  {'CV Acc':>8}  {'±std':>6}  {'Epochs':>6}")
     print("─" * 56)
