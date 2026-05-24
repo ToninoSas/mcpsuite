@@ -97,7 +97,10 @@ mcpsuite/
 ├── phase1e2/                   ← inferenza single-turn + live tasks
 │   ├── runner.py               ← Qwen 4-bit inference + 32-layer forward hooks
 │   │                             (fix: skip system messages nei turni live)
-│   └── pipeline.py             ← CLI orchestrator
+│   ├── sampler.py              ← campionamento BFCL: `proportional_sample` (legacy,
+│   │                             --total/--weights) e `exact_sample` (--counts)
+│   └── pipeline.py             ← CLI orchestrator (--counts mutuamente esclusivo
+│                                 con --total/--weights)
 ├── outputs/
 │   ├── single_turn/            ← 1000 campioni (simple, multiple, parallel, parallel_multiple)
 │   │   ├── labeled_dataset.jsonl
@@ -206,9 +209,18 @@ huggingface-cli download gorilla-llm/Berkeley-Function-Calling-Leaderboard \
     --repo-type dataset --local-dir ./data
 
 # Run unit tests (no GPU needed)
-cd phase1e2 && python -m pytest test_evaluator.py -v
+cd phase1e2 && python -m pytest test_evaluator.py test_sampler.py -v
 
-# Single-turn inference (simple/multiple/parallel/parallel_multiple)
+# Single-turn inference — modalità esatta (raccomandata per nuovi esperimenti)
+cd phase1e2 && python pipeline.py \
+    --data_dir ./data \
+    --output   ../outputs/single_turn/labeled_dataset.jsonl \
+    --num_gpus 2 \
+    --max_seq_len 3072 \
+    --capture_activations \
+    --counts '{"simple":400,"multiple":200,"parallel":200,"parallel_multiple":200}'
+
+# Single-turn inference — modalità proporzionale (legacy, backward-compatible)
 cd phase1e2 && python pipeline.py \
     --data_dir ./data \
     --output   ../outputs/single_turn/labeled_dataset.jsonl \
@@ -222,11 +234,10 @@ cd phase1e2 && python pipeline.py \
 cd phase1e2 && python pipeline.py \
     --data_dir ./data \
     --output   ../outputs/single_turn2/labeled_dataset.jsonl \
-    --total    500 \
     --num_gpus 1 \
     --max_seq_len 2048 \
     --capture_activations \
-    --weights '{"live_multiple":0.70,"live_parallel":0.15,"live_parallel_multiple":0.15}'
+    --counts '{"live_multiple":350,"live_parallel":75,"live_parallel_multiple":75}'
 
 # Merge attivazioni + metriche
 cd phase3 && python merge_activations.py \

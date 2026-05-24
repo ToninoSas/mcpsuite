@@ -75,9 +75,40 @@ python -m pytest test_evaluator.py -v
 
 ## Step 4 — Inferenza e cattura attivazioni
 
-### Single-turn (simple, multiple, parallel, parallel_multiple)
+Sono disponibili due modalità di campionamento, mutuamente esclusive:
+
+- **`--counts` (esatta, raccomandata)** — specifica direttamente quanti sample prelevare da ogni categoria.
+- **`--total` + `--weights` (proporzionale, legacy)** — distribuisce un budget totale in base a pesi normalizzati.
+
+### Single-turn — modalità esatta (raccomandata)
 
 ```bash
+cd phase1e2 && python pipeline.py \
+    --data_dir ./data \
+    --output   ../outputs/single_turn/labeled_dataset.jsonl \
+    --num_gpus 2 \
+    --max_seq_len 3072 \
+    --capture_activations \
+    --counts '{"simple":400,"multiple":200,"parallel":200,"parallel_multiple":200}'
+```
+
+### Live tasks — modalità esatta (raccomandata)
+
+```bash
+# num_gpus=1 obbligatorio: le live tasks hanno prompt lunghi che causano OOM su dual-GPU
+cd phase1e2 && python pipeline.py \
+    --data_dir ./data \
+    --output   ../outputs/single_turn2/labeled_dataset.jsonl \
+    --num_gpus 1 \
+    --max_seq_len 2048 \
+    --capture_activations \
+    --counts '{"live_multiple":350,"live_parallel":75,"live_parallel_multiple":75}'
+```
+
+### Modalità proporzionale (legacy, backward-compatible)
+
+```bash
+# Single-turn
 cd phase1e2 && python pipeline.py \
     --data_dir ./data \
     --output   ../outputs/single_turn/labeled_dataset.jsonl \
@@ -86,12 +117,8 @@ cd phase1e2 && python pipeline.py \
     --max_seq_len 3072 \
     --capture_activations \
     --weights '{"simple":0.40,"multiple":0.20,"parallel":0.20,"parallel_multiple":0.20}'
-```
 
-### Live tasks (live_multiple, live_parallel, live_parallel_multiple)
-
-```bash
-# num_gpus=1 obbligatorio: le live tasks hanno prompt lunghi che causano OOM su dual-GPU
+# Live tasks
 cd phase1e2 && python pipeline.py \
     --data_dir ./data \
     --output   ../outputs/single_turn2/labeled_dataset.jsonl \
@@ -101,6 +128,11 @@ cd phase1e2 && python pipeline.py \
     --capture_activations \
     --weights '{"live_multiple":0.70,"live_parallel":0.15,"live_parallel_multiple":0.15}'
 ```
+
+> **Nota**: `--counts` e `--total`/`--weights` sono mutuamente esclusivi. La modalità esatta
+> è raccomandata per nuovi esperimenti perché elimina ambiguità sul numero finale di sample
+> per categoria. Per riprodurre un esperimento vecchio con `--counts`, leggi i conteggi
+> effettivi dal report di `proportional_sample` e passali con lo stesso `--seed`.
 
 ---
 
@@ -167,7 +199,7 @@ mcpsuite/
 │   └── data_schema.md     ← schema JSONL e layout dataset BFCL
 ├── phase1e2/
 │   ├── loader.py          ← carica e correla domande + ground truth per ID
-│   ├── sampler.py         ← campionamento proporzionale tra categorie
+│   ├── sampler.py         ← campionamento proporzionale (`proportional_sample`) o per conteggi esatti (`exact_sample`)
 │   ├── evaluator.py       ← valutazione deterministica AST (no LLM-judge)
 │   ├── runner.py          ← inferenza Qwen 4-bit + 32 forward hook
 │   ├── pipeline.py        ← orchestratore CLI

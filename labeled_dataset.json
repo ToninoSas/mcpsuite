@@ -1,0 +1,859 @@
+{
+    "id": "simple_379",
+    "category": "simple",
+    "question": [
+        [
+            {
+                "role": "user",
+                "content": "What's the current time in Sydney, Australia?"
+            }
+        ]
+    ],
+    "functions": [
+        {
+            "name": "get_current_time",
+            "description": "Retrieve the current time in a specific time zone.",
+            "parameters": {
+                "type": "dict",
+                "properties": {
+                    "location": {
+                        "type": "string",
+                        "description": "The name of the city."
+                    },
+                    "country": {
+                        "type": "string",
+                        "description": "The name of the country."
+                    },
+                    "timezone": {
+                        "type": "string",
+                        "description": "The optional timezone to get current time. Default "
+                    }
+                },
+                "required": [
+                    "location",
+                    "country"
+                ]
+            }
+        }
+    ],
+    "ground_truth": [
+        {
+            "get_current_time": {
+                "location": [
+                    "Sydney"
+                ],
+                "country": [
+                    "Australia",
+                    "Australia/Sydney"
+                ],
+                "timezone": [
+                    ""
+                ]
+            }
+        }
+    ],
+    "execution_result_type": [],
+    "model_raw_output": "<tool_call>\n{\"name\": \"get_current_time\", \"arguments\": {\"location\": \"Sydney\", \"country\": \"Australia\"}}\n</tool_call>",
+    "label": 0,
+    "hallucination_type": null,
+    "eval_details": {
+        "category": "simple",
+        "raw_output_len": 114,
+        "predicted_calls": [
+            {
+                "name": "get_current_time",
+                "arguments": {
+                    "location": "Sydney",
+                    "country": "Australia"
+                }
+            }
+        ],
+        "n_predicted": 1,
+        "n_expected": 1,
+        "comparisons": [
+            {
+                "matched": true,
+                "name_match": true,
+                "args_match": true,
+                "missing_args": [],
+                "extra_args": [],
+                "wrong_values": {},
+                "is_correct": true
+            }
+        ]
+    }
+}
+{
+    "id": "simple_12",
+    "category": "simple",
+    "question": [
+        [
+            {
+                "role": "user",
+                "content": "Calculate the circumference of a circle with radius 3"
+            }
+        ]
+    ],
+    "functions": [
+        {
+            "name": "geometry.circumference",
+            "description": "Calculate the circumference of a circle given the radius.",
+            "parameters": {
+                "type": "dict",
+                "properties": {
+                    "radius": {
+                        "type": "integer",
+                        "description": "The radius of the circle."
+                    },
+                    "units": {
+                        "type": "string",
+                        "description": "Units for the output circumference measurement. Default is 'cm'."
+                    }
+                },
+                "required": [
+                    "radius"
+                ]
+            }
+        }
+    ],
+    "ground_truth": [
+        {
+            "geometry.circumference": {
+                "radius": [
+                    3
+                ],
+                "units": [
+                    "cm",
+                    ""
+                ]
+            }
+        }
+    ],
+    "execution_result_type": [],
+    "model_raw_output": "<tool_call>\n{\"name\": \"geometry.circumference\", \"arguments\": {\"radius\": 3, \"units\": \"cm\"}}\n</tool_call>",
+    "label": 0,
+    "hallucination_type": null,
+    "eval_details": {
+        "category": "simple",
+        "raw_output_len": 102,
+        "predicted_calls": [
+            {
+                "name": "geometry.circumference",
+                "arguments": {
+                    "radius": 3,
+                    "units": "cm"
+                }
+            }
+        ],
+        "n_predicted": 1,
+        "n_expected": 1,
+        "comparisons": [
+            {
+                "matched": true,
+                "name_match": true,
+                "args_match": true,
+                "missing_args": [],
+                "extra_args": [],
+                "wrong_values": {},
+                "is_correct": true
+            }
+        ]
+    }
+}
+{
+    "id": "simple_140",
+    "category": "simple",
+    "question": [
+        [
+            {
+                "role": "user",
+                "content": "Calculate the Compound Annual Growth Rate (CAGR) for an initial investment of $2000, final value of $3000 in a period of 4 years."
+            }
+        ]
+    ],
+    "functions": [
+        {
+            "name": "calculate_cagr",
+            "description": "Calculate the Compound Annual Growth Rate (CAGR) given an initial investment value, a final investment value, and the number of years.",
+            "parameters": {
+                "type": "dict",
+                "properties": {
+                    "initial_value": {
+                        "type": "integer",
+                        "description": "The initial investment value."
+                    },
+                    "final_value": {
+                        "type": "integer",
+                        "description": "The final investment value."
+                    },
+                    "period_in_years": {
+                        "type": "integer",
+                        "description": "The period of the investment in years."
+                    }
+                },
+                "required": [
+                    "initial_value",
+                    "final_value",
+                    "period_in_years"
+                ]
+            }
+        }
+    ],
+    "ground_truth": [
+        {
+            "calculate_cagr": {
+                "initial_value": [
+                    2000
+                ],
+                "final_value": [
+                    3000
+                ],
+                "period_in_years": [
+                    4
+                ]
+            }
+        }
+    ],
+    "execution_result_type": [],
+    "model_raw_output": "<call calculate_cagr {\"initial_value\": 2000, \"final_value\": 3000, \"period_in_years\": 4}>",
+    "label": 1,
+    "hallucination_type": "NO_CALL_MADE",
+    "eval_details": {
+        "category": "simple",
+        "raw_output_len": 88,
+        "predicted_calls": [],
+        "n_predicted": 0,
+        "parse_error": true
+    }
+}
+{
+    "id": "simple_52",
+    "category": "simple",
+    "question": [
+        [
+            {
+                "role": "user",
+                "content": "Calculate the heat capacity at constant pressure for air, given its temperature is 298K and volume is 10 m^3."
+            }
+        ]
+    ],
+    "functions": [
+        {
+            "name": "calc_heat_capacity",
+            "description": "Calculate the heat capacity at constant pressure of air using its temperature and volume.",
+            "parameters": {
+                "type": "dict",
+                "properties": {
+                    "temp": {
+                        "type": "integer",
+                        "description": "The temperature of the gas in Kelvin."
+                    },
+                    "volume": {
+                        "type": "integer",
+                        "description": "The volume of the gas in m^3."
+                    },
+                    "gas": {
+                        "type": "string",
+                        "description": "Type of gas, with 'air' as default."
+                    }
+                },
+                "required": [
+                    "temp",
+                    "volume"
+                ]
+            }
+        }
+    ],
+    "ground_truth": [
+        {
+            "calc_heat_capacity": {
+                "temp": [
+                    298
+                ],
+                "volume": [
+                    10
+                ],
+                "gas": [
+                    "air",
+                    ""
+                ]
+            }
+        }
+    ],
+    "execution_result_type": [],
+    "model_raw_output": "<tool_call>\n{\"name\": \"calc_heat_capacity\", \"arguments\": {\"temp\": 298, \"volume\": 10, \"gas\": \"air\"}}\n</tool_call>",
+    "label": 0,
+    "hallucination_type": null,
+    "eval_details": {
+        "category": "simple",
+        "raw_output_len": 111,
+        "predicted_calls": [
+            {
+                "name": "calc_heat_capacity",
+                "arguments": {
+                    "temp": 298,
+                    "volume": 10,
+                    "gas": "air"
+                }
+            }
+        ],
+        "n_predicted": 1,
+        "n_expected": 1,
+        "comparisons": [
+            {
+                "matched": true,
+                "name_match": true,
+                "args_match": true,
+                "missing_args": [],
+                "extra_args": [],
+                "wrong_values": {},
+                "is_correct": true
+            }
+        ]
+    }
+}
+{
+    "id": "simple_125",
+    "category": "simple",
+    "question": [
+        [
+            {
+                "role": "user",
+                "content": "Predict house price in San Francisco based on its area of 2500 square feet, number of rooms as 5 and year of construction is 1990."
+            }
+        ]
+    ],
+    "functions": [
+        {
+            "name": "predict_house_price",
+            "description": "Predict house price based on area, number of rooms and year of construction.",
+            "parameters": {
+                "type": "dict",
+                "properties": {
+                    "area": {
+                        "type": "integer",
+                        "description": "Area of the house in square feet."
+                    },
+                    "rooms": {
+                        "type": "integer",
+                        "description": "Number of rooms in the house."
+                    },
+                    "year": {
+                        "type": "integer",
+                        "description": "Year when the house was constructed."
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "The location or city of the house."
+                    }
+                },
+                "required": [
+                    "area",
+                    "rooms",
+                    "year",
+                    "location"
+                ]
+            }
+        }
+    ],
+    "ground_truth": [
+        {
+            "predict_house_price": {
+                "area": [
+                    2500
+                ],
+                "rooms": [
+                    5
+                ],
+                "year": [
+                    1990
+                ],
+                "location": [
+                    "San Francisco",
+                    "SF"
+                ]
+            }
+        }
+    ],
+    "execution_result_type": [],
+    "model_raw_output": "<tool_call>\n{\"name\": \"predict_house_price\", \"arguments\": {\"area\": 2500, \"rooms\": 5, \"year\": 1990, \"location\": \"San Francisco\"}}\n</tool_call>",
+    "label": 0,
+    "hallucination_type": null,
+    "eval_details": {
+        "category": "simple",
+        "raw_output_len": 140,
+        "predicted_calls": [
+            {
+                "name": "predict_house_price",
+                "arguments": {
+                    "area": 2500,
+                    "rooms": 5,
+                    "year": 1990,
+                    "location": "San Francisco"
+                }
+            }
+        ],
+        "n_predicted": 1,
+        "n_expected": 1,
+        "comparisons": [
+            {
+                "matched": true,
+                "name_match": true,
+                "args_match": true,
+                "missing_args": [],
+                "extra_args": [],
+                "wrong_values": {},
+                "is_correct": true
+            }
+        ]
+    }
+}
+{
+    "id": "simple_71",
+    "category": "simple",
+    "question": [
+        [
+            {
+                "role": "user",
+                "content": "Generate a DNA sequence with 100 bases including more G (Guanine) and C (Cytosine)."
+            }
+        ]
+    ],
+    "functions": [
+        {
+            "name": "generate_DNA_sequence",
+            "description": "Generate a random DNA sequence with a specific length and nucleotide preference.",
+            "parameters": {
+                "type": "dict",
+                "properties": {
+                    "length": {
+                        "type": "integer",
+                        "description": "The length of the DNA sequence to be generated."
+                    },
+                    "preferences": {
+                        "type": "array",
+                        "items": {
+                            "type": "string",
+                            "enum": [
+                                "A",
+                                "T",
+                                "C",
+                                "G"
+                            ]
+                        },
+                        "description": "Preferred nucleotides to include more frequently in the DNA sequence."
+                    }
+                },
+                "required": [
+                    "length",
+                    "preferences"
+                ]
+            }
+        }
+    ],
+    "ground_truth": [
+        {
+            "generate_DNA_sequence": {
+                "length": [
+                    100
+                ],
+                "preferences": [
+                    [
+                        "G",
+                        "C"
+                    ],
+                    [
+                        "C",
+                        "G"
+                    ]
+                ]
+            }
+        }
+    ],
+    "execution_result_type": [],
+    "model_raw_output": "<tool_call>\n{\"name\": \"generate_DNA_sequence\", \"arguments\": {\"length\": 100, \"preferences\": [\"G\", \"C\"]}}\n</tool_call>",
+    "label": 0,
+    "hallucination_type": null,
+    "eval_details": {
+        "category": "simple",
+        "raw_output_len": 115,
+        "predicted_calls": [
+            {
+                "name": "generate_DNA_sequence",
+                "arguments": {
+                    "length": 100,
+                    "preferences": [
+                        "G",
+                        "C"
+                    ]
+                }
+            }
+        ],
+        "n_predicted": 1,
+        "n_expected": 1,
+        "comparisons": [
+            {
+                "matched": true,
+                "name_match": true,
+                "args_match": true,
+                "missing_args": [],
+                "extra_args": [],
+                "wrong_values": {},
+                "is_correct": true
+            }
+        ]
+    }
+}
+{
+    "id": "simple_327",
+    "category": "simple",
+    "question": [
+        [
+            {
+                "role": "user",
+                "content": "Give me the schedule of Manchester United for the next 6 games in Premier League."
+            }
+        ]
+    ],
+    "functions": [
+        {
+            "name": "sports_team.get_schedule",
+            "description": "Fetches the schedule of the specified sports team for the specified number of games in the given league.",
+            "parameters": {
+                "type": "dict",
+                "properties": {
+                    "team_name": {
+                        "type": "string",
+                        "description": "The name of the sports team."
+                    },
+                    "num_of_games": {
+                        "type": "integer",
+                        "description": "Number of games for which to fetch the schedule."
+                    },
+                    "league": {
+                        "type": "string",
+                        "description": "The name of the sports league. If not provided, the function will fetch the schedule for all games, regardless of the league."
+                    },
+                    "location": {
+                        "type": "string",
+                        "description": "Optional. The city or venue where games are to be held. If not provided, default that all venues will be considered."
+                    }
+                },
+                "required": [
+                    "team_name",
+                    "num_of_games",
+                    "league"
+                ]
+            }
+        }
+    ],
+    "ground_truth": [
+        {
+            "sports_team.get_schedule": {
+                "team_name": [
+                    "Manchester United",
+                    "Man United",
+                    "Man U",
+                    "MUFC"
+                ],
+                "num_of_games": [
+                    6
+                ],
+                "league": [
+                    "Premier League"
+                ],
+                "location": [
+                    ""
+                ]
+            }
+        }
+    ],
+    "execution_result_type": [],
+    "model_raw_output": "<tool_call>\n{\"name\": \"sports_team.get_schedule\", \"arguments\": {\"team_name\": \"Manchester United\", \"num_of_games\": 6, \"league\": \"Premier League\"}}\n</tool_call>",
+    "label": 0,
+    "hallucination_type": null,
+    "eval_details": {
+        "category": "simple",
+        "raw_output_len": 157,
+        "predicted_calls": [
+            {
+                "name": "sports_team.get_schedule",
+                "arguments": {
+                    "team_name": "Manchester United",
+                    "num_of_games": 6,
+                    "league": "Premier League"
+                }
+            }
+        ],
+        "n_predicted": 1,
+        "n_expected": 1,
+        "comparisons": [
+            {
+                "matched": true,
+                "name_match": true,
+                "args_match": true,
+                "missing_args": [],
+                "extra_args": [],
+                "wrong_values": {},
+                "is_correct": true
+            }
+        ]
+    }
+}
+{
+    "id": "simple_114",
+    "category": "simple",
+    "question": [
+        [
+            {
+                "role": "user",
+                "content": "Find the probability of getting exactly 5 heads in 10 fair coin tosses."
+            }
+        ]
+    ],
+    "functions": [
+        {
+            "name": "prob_dist.binomial",
+            "description": "Compute the probability of having 'success' outcome from binomial distribution.",
+            "parameters": {
+                "type": "dict",
+                "properties": {
+                    "trials": {
+                        "type": "integer",
+                        "description": "The number of independent experiments."
+                    },
+                    "successes": {
+                        "type": "integer",
+                        "description": "The number of success events."
+                    },
+                    "p": {
+                        "type": "float",
+                        "description": "The probability of success on any given trial, defaults to 0.5"
+                    }
+                },
+                "required": [
+                    "trials",
+                    "successes"
+                ]
+            }
+        }
+    ],
+    "ground_truth": [
+        {
+            "prob_dist.binomial": {
+                "trials": [
+                    10
+                ],
+                "successes": [
+                    5
+                ],
+                "p": [
+                    0.5,
+                    ""
+                ]
+            }
+        }
+    ],
+    "execution_result_type": [],
+    "model_raw_output": "<tool_call>\n{\"name\": \"prob_dist.binomial\", \"arguments\": {\"trials\": 10, \"successes\": 5, \"p\": 0.5}}\n</tool_call>",
+    "label": 0,
+    "hallucination_type": null,
+    "eval_details": {
+        "category": "simple",
+        "raw_output_len": 110,
+        "predicted_calls": [
+            {
+                "name": "prob_dist.binomial",
+                "arguments": {
+                    "trials": 10,
+                    "successes": 5,
+                    "p": 0.5
+                }
+            }
+        ],
+        "n_predicted": 1,
+        "n_expected": 1,
+        "comparisons": [
+            {
+                "matched": true,
+                "name_match": true,
+                "args_match": true,
+                "missing_args": [],
+                "extra_args": [],
+                "wrong_values": {},
+                "is_correct": true
+            }
+        ]
+    }
+}
+{
+    "id": "simple_57",
+    "category": "simple",
+    "question": [
+        [
+            {
+                "role": "user",
+                "content": "Calculate the cell density in a sample with an optical density of 0.6, where the experiment dilution is 5 times."
+            }
+        ]
+    ],
+    "functions": [
+        {
+            "name": "calculate_cell_density",
+            "description": "Calculate the cell density of a biological sample based on its optical density and the experiment dilution.",
+            "parameters": {
+                "type": "dict",
+                "properties": {
+                    "optical_density": {
+                        "type": "float",
+                        "description": "The optical density of the sample, usually obtained from a spectrophotometer reading."
+                    },
+                    "dilution": {
+                        "type": "integer",
+                        "description": "The dilution factor applied during the experiment."
+                    },
+                    "calibration_factor": {
+                        "type": "float",
+                        "description": "The calibration factor to adjust the density, default value is 1e9 assuming cell density is in CFU/mL."
+                    }
+                },
+                "required": [
+                    "optical_density",
+                    "dilution"
+                ]
+            }
+        }
+    ],
+    "ground_truth": [
+        {
+            "calculate_cell_density": {
+                "optical_density": [
+                    0.6
+                ],
+                "dilution": [
+                    5
+                ],
+                "calibration_factor": [
+                    1000000000.0,
+                    ""
+                ]
+            }
+        }
+    ],
+    "execution_result_type": [],
+    "model_raw_output": "<tool_call>\n{\"name\": \"calculate_cell_density\", \"arguments\": {\"optical_density\": 0.6, \"dilution\": 5, \"calibration_factor\": 1e9}}\n</tool_call>",
+    "label": 0,
+    "hallucination_type": null,
+    "eval_details": {
+        "category": "simple",
+        "raw_output_len": 140,
+        "predicted_calls": [
+            {
+                "name": "calculate_cell_density",
+                "arguments": {
+                    "optical_density": 0.6,
+                    "dilution": 5,
+                    "calibration_factor": 1000000000.0
+                }
+            }
+        ],
+        "n_predicted": 1,
+        "n_expected": 1,
+        "comparisons": [
+            {
+                "matched": true,
+                "name_match": true,
+                "args_match": true,
+                "missing_args": [],
+                "extra_args": [],
+                "wrong_values": {},
+                "is_correct": true
+            }
+        ]
+    }
+}
+{
+    "id": "simple_377",
+    "category": "simple",
+    "question": [
+        [
+            {
+                "role": "user",
+                "content": "What is the current time in Sydney, Australia?"
+            }
+        ]
+    ],
+    "functions": [
+        {
+            "name": "get_current_time",
+            "description": "Retrieve the current time for a specified city and country.",
+            "parameters": {
+                "type": "dict",
+                "properties": {
+                    "city": {
+                        "type": "string",
+                        "description": "The city for which the current time is to be retrieved."
+                    },
+                    "country": {
+                        "type": "string",
+                        "description": "The country where the city is located."
+                    },
+                    "format": {
+                        "type": "string",
+                        "description": "The format in which the time is to be displayed, optional (defaults to 'HH:MM:SS')."
+                    }
+                },
+                "required": [
+                    "city",
+                    "country"
+                ]
+            }
+        }
+    ],
+    "ground_truth": [
+        {
+            "get_current_time": {
+                "city": [
+                    "Sydney"
+                ],
+                "country": [
+                    "Australia"
+                ],
+                "format": [
+                    "",
+                    "HH:MM:SS"
+                ]
+            }
+        }
+    ],
+    "execution_result_type": [],
+    "model_raw_output": "<tool_call>\n{\"name\": \"get_current_time\", \"arguments\": {\"city\": \"Sydney\", \"country\": \"Australia\"}}\n</tool_call>",
+    "label": 0,
+    "hallucination_type": null,
+    "eval_details": {
+        "category": "simple",
+        "raw_output_len": 110,
+        "predicted_calls": [
+            {
+                "name": "get_current_time",
+                "arguments": {
+                    "city": "Sydney",
+                    "country": "Australia"
+                }
+            }
+        ],
+        "n_predicted": 1,
+        "n_expected": 1,
+        "comparisons": [
+            {
+                "matched": true,
+                "name_match": true,
+                "args_match": true,
+                "missing_args": [],
+                "extra_args": [],
+                "wrong_values": {},
+                "is_correct": true
+            }
+        ]
+    }
+}

@@ -36,9 +36,9 @@ import time
 from collections import Counter
 from pathlib import Path
 
-from loader    import load_all, BFCLSample, MULTI_TURN_CATEGORIES
-from sampler   import proportional_sample, split_train_val_test, DEFAULT_WEIGHTS
-from runner    import RunnerConfig, build_runner, run_inference_on_samples, run_inference_parallel
+from loader import load_all, BFCLSample, MULTI_TURN_CATEGORIES
+from sampler import exact_sample, proportional_sample, split_train_val_test, DEFAULT_WEIGHTS
+from runner import RunnerConfig, build_runner, run_inference_on_samples, run_inference_parallel
 from evaluator import evaluate, evaluate_multi_turn
 
 
@@ -69,19 +69,21 @@ def sample_to_dict(s: BFCLSample, eval_result) -> dict:
 def run_pipeline(
     data_dir: str,
     output_path: str,
-    total_samples: int,
-    runner_config: RunnerConfig,
+    total_samples: int | None = None,
+    runner_config: RunnerConfig | None = None,
     seed: int = 42,
     skip_inference: bool = False,
     num_gpus: int = 1,
     weights: dict[str, float] | None = None,
     capture_activations: bool = False,
     checkpoint_dir: str | None = None,
+    counts: dict | None = None,
 ) -> None:
     out = Path(output_path)
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    ckpt_dir = Path(checkpoint_dir) if checkpoint_dir else out.parent / "checkpoint"
+    ckpt_dir = Path(
+        checkpoint_dir) if checkpoint_dir else out.parent / "checkpoint"
 
     t_pipeline_start = time.time()
     timings: dict[str, float] = {}
@@ -101,20 +103,31 @@ def run_pipeline(
     total_available = sum(len(v) for v in corpus.values())
     print(f"\n[pipeline] Totale sample disponibili: {total_available}")
 
-    # ── 2. Campionamento ──────────────────────────────────────────────────────
-    print("\n" + "═" * 60)
-    print("FASE 1.2 — Campionamento proporzionale")
-    print("═" * 60)
-
-    # Esclude sample senza ground truth
     t0 = time.time()
-    samples = proportional_sample(
-        corpus,
-        total=total_samples,
-        weights=weights,
-        seed=seed,
-        filter_fn=lambda s: len(s.ground_truth) > 0,
-    )
+    if counts is not None:
+        # ── 2. Campionamento per conteggi esatti ──────────────────────────────────
+        print("\n" + "═" * 60)
+        print("FASE 1.2 — Campionamento per conteggi esatti")
+        print("═" * 60)
+        samples = exact_sample(
+            corpus=corpus,
+            counts=counts,
+            seed=seed,
+            filter_fn=lambda s: len(s.ground_truth) > 0,
+        )
+    else:
+        # ── 2. Campionamento proporzionale ────────────────────────────────────────
+        print("\n" + "═" * 60)
+        print("FASE 1.2 — Campionamento proporzionale")
+        print("═" * 60)
+        # Esclude sample senza ground truth
+        samples = proportional_sample(
+            corpus,
+            total=total_samples,
+            weights=weights,
+            seed=seed,
+            filter_fn=lambda s: len(s.ground_truth) > 0,
+        )
     timings["sample"] = time.time() - t0
 
     # ── 3. Inferenza ──────────────────────────────────────────────────────────
@@ -125,9 +138,11 @@ def run_pipeline(
         print(f"FASE 1.3 — Inferenza {model_label} 4-bit")
         print("═" * 60)
         if capture_activations:
-            print("[pipeline] capture_activations=True — hidden state catturato durante l'inferenza")
+            print(
+                "[pipeline] capture_activations=True — hidden state catturato durante l'inferenza")
         if num_gpus > 1:
-            print(f"[pipeline] Modalità multi-GPU: {num_gpus} GPU in data-parallel")
+            print(
+                f"[pipeline] Modalità multi-GPU: {num_gpus} GPU in data-parallel")
             samples = run_inference_parallel(
                 samples, runner_config, num_gpus=num_gpus,
                 capture_activations=capture_activations,
@@ -188,7 +203,8 @@ def run_pipeline(
         # Statistiche per categoria
         cat = sample.category
         if cat not in cat_stats:
-            cat_stats[cat] = {"n": 0, "n_correct": 0, "n_halluc": 0, "htypes": Counter()}
+            cat_stats[cat] = {"n": 0, "n_correct": 0,
+                              "n_halluc": 0, "htypes": Counter()}
         cat_stats[cat]["n"] += 1
         if result.label == 0:
             cat_stats[cat]["n_correct"] += 1
@@ -227,7 +243,8 @@ def run_pipeline(
         s.label = rec["label"]
         labeled_samples.append(s)
 
-    train_set, val_set, test_set = split_train_val_test(labeled_samples, seed=seed)
+    train_set, val_set, test_set = split_train_val_test(
+        labeled_samples, seed=seed)
 
     splits_dir = out.parent / "splits"
     splits_dir.mkdir(exist_ok=True)
@@ -256,7 +273,7 @@ def run_pipeline(
         print("═" * 60)
 
         # Lookup: id → sample originale (con hidden_vec) e id → record labellato
-        sample_by_id  = {s.id: s for s in samples}
+        sample_by_id = {s.id: s for s in samples}
         labeled_by_id = {r["id"]: r for r in labeled}
 
         acts_base = out.parent / "activations"
@@ -273,7 +290,7 @@ def run_pipeline(
 
             for s in split_data:
                 orig = sample_by_id.get(s.id)
-                vec  = getattr(orig, "hidden_vec", None) if orig else None
+                vec = getattr(orig, "hidden_vec", None) if orig else None
                 if vec is None:
                     missing += 1
                     continue
@@ -287,10 +304,12 @@ def run_pipeline(
                 })
 
             if missing:
-                print(f"[pipeline] ⚠  {missing} sample senza hidden_vec in '{split_name}'")
+                print(
+                    f"[pipeline] ⚠  {missing} sample senza hidden_vec in '{split_name}'")
 
             if X:
-                X_arr = np.stack(X).astype(np.float16)  # (N, num_layers, hidden_size)
+                # (N, num_layers, hidden_size)
+                X_arr = np.stack(X).astype(np.float16)
                 np.save(split_dir / "X.npy", X_arr)
                 np.save(split_dir / "y.npy", np.array(y, dtype=np.int8))
                 with open(split_dir / "meta.jsonl", "w", encoding="utf-8") as f:
@@ -307,26 +326,30 @@ def run_pipeline(
                 }
                 with open(split_dir / "shape.json", "w") as f:
                     json.dump(shape_info, f, indent=2)
-                print(f"[pipeline]   {split_name}: {len(X)} sample × {X_arr.shape[1]} layer × {X_arr.shape[2]} dim → {split_dir}/")
+                print(
+                    f"[pipeline]   {split_name}: {len(X)} sample × {X_arr.shape[1]} layer × {X_arr.shape[2]} dim → {split_dir}/")
             else:
-                print(f"[pipeline] ⚠  nessuna activation salvata per '{split_name}'")
+                print(
+                    f"[pipeline] ⚠  nessuna activation salvata per '{split_name}'")
     timings["activations"] = time.time() - t0
 
     # ── Report finale ─────────────────────────────────────────────────────────
     timings["total"] = time.time() - t_pipeline_start
 
     total_labeled = len(labeled)
-    n_correct     = label_counts[0]
-    n_halluc      = label_counts[1]
-    accuracy      = n_correct / total_labeled if total_labeled else 0.0
-    halluc_rate   = n_halluc  / total_labeled if total_labeled else 0.0
+    n_correct = label_counts[0]
+    n_halluc = label_counts[1]
+    accuracy = n_correct / total_labeled if total_labeled else 0.0
+    halluc_rate = n_halluc / total_labeled if total_labeled else 0.0
 
     W = 62
     print(f"\n{'═' * W}")
     print(f"  RISULTATI — {total_labeled} sample")
     print(f"{'═' * W}")
-    print(f"  Accuracy  (corretti/totale)  : {accuracy*100:>6.1f}%  ({n_correct}/{total_labeled})")
-    print(f"  Hallucination rate           : {halluc_rate*100:>6.1f}%  ({n_halluc}/{total_labeled})")
+    print(
+        f"  Accuracy  (corretti/totale)  : {accuracy*100:>6.1f}%  ({n_correct}/{total_labeled})")
+    print(
+        f"  Hallucination rate           : {halluc_rate*100:>6.1f}%  ({n_halluc}/{total_labeled})")
 
     if n_halluc:
         print(f"\n  Distribuzione tipi allucinazione:")
@@ -337,10 +360,12 @@ def run_pipeline(
     print(f"  {'categoria':<30} {'N':>5}  {'acc':>7}  {'hall%':>6}  top halluc. type")
     print(f"  {'─'*30} {'─'*5}  {'─'*7}  {'─'*6}  {'─'*20}")
     for cat, st in sorted(cat_stats.items()):
-        acc_cat   = st["n_correct"] / st["n"] if st["n"] else 0
-        hall_cat  = st["n_halluc"]  / st["n"] if st["n"] else 0
-        top_htype = max(st["htypes"], key=st["htypes"].get) if st["htypes"] else "—"
-        print(f"  {cat:<30} {st['n']:>5}  {acc_cat*100:>6.1f}%  {hall_cat*100:>5.1f}%  {top_htype}")
+        acc_cat = st["n_correct"] / st["n"] if st["n"] else 0
+        hall_cat = st["n_halluc"] / st["n"] if st["n"] else 0
+        top_htype = max(
+            st["htypes"], key=st["htypes"].get) if st["htypes"] else "—"
+        print(
+            f"  {cat:<30} {st['n']:>5}  {acc_cat*100:>6.1f}%  {hall_cat*100:>5.1f}%  {top_htype}")
 
     print(f"\n  Tempi di esecuzione:")
     phase_labels = [
@@ -417,13 +442,18 @@ def run_pipeline(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="BFCL Hallucination Probe — Fase 1")
-    p.add_argument("--data_dir",        default="./data",           help="Cartella BFCL")
-    p.add_argument("--output",          default="./outputs/labeled_dataset.jsonl")
-    p.add_argument("--total",           type=int, default=2000,     help="Sample totali")
+    p = argparse.ArgumentParser(
+        description="BFCL Hallucination Probe — Fase 1")
+    p.add_argument("--data_dir",        default="./data",
+                   help="Cartella BFCL")
+    p.add_argument("--output",
+                   default="./outputs/labeled_dataset.jsonl")
+    p.add_argument("--total",           type=int,
+                   default=None,     help="Sample totali (default 2000; ignorato se --counts è passato)")
     p.add_argument("--model",           default="Qwen/Qwen3.5-9B",
                    help="HuggingFace model ID. Es: Qwen/Qwen3.5-9B o meta-llama/Meta-Llama-3.1-8B-Instruct")
-    p.add_argument("--backend",         default="transformers",     choices=["transformers", "llama_cpp"])
+    p.add_argument("--backend",         default="transformers",
+                   choices=["transformers", "llama_cpp"])
     p.add_argument("--max_new_tokens",  type=int, default=512)
     p.add_argument("--max_seq_len",     type=int, default=None,
                    help="Tronca l'input a N token (mantiene gli ultimi N). "
@@ -442,7 +472,38 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--checkpoint_dir", type=str, default=None,
                    help="Directory checkpoint (default: outputs/checkpoint/). "
                         "Se esiste già, riprende da dove si era fermato.")
-    return p.parse_args()
+
+    p.add_argument(
+        "--counts",
+        type=str,
+        default=None,
+        help='JSON dict con conteggi esatti per categoria, es. '
+        '\'{"simple":100,"multiple":50,"parallel":30}\'. '
+        'Mutuamente esclusivo con --total/--weights.',
+    )
+
+    args = p.parse_args()
+
+    # ── Validazione --counts / --total/--weights ──────────────────────────────
+    if args.counts is not None:
+        if args.weights is not None or args.total is not None:
+            p.error("--counts è mutuamente esclusivo con --total/--weights")
+        try:
+            counts_parsed = json.loads(args.counts)
+        except json.JSONDecodeError as e:
+            p.error(f"--counts non è JSON valido: {e}")
+        if not isinstance(counts_parsed, dict) or not all(
+            isinstance(v, int) for v in counts_parsed.values()
+        ):
+            p.error("--counts deve essere un dict {str: int}")
+        # Sostituisce la stringa con il dict già parsato
+        args.counts = counts_parsed
+    else:
+        # Modalità proporzionale legacy: applica default se --total non è passato
+        if args.total is None:
+            args.total = 2000
+
+    return args
 
 
 if __name__ == "__main__":
@@ -453,7 +514,8 @@ if __name__ == "__main__":
     if args.weights:
         weights = json.loads(args.weights)
     elif args.no_multi_turn:
-        weights = {**DEFAULT_WEIGHTS, **{cat: 0.0 for cat in MULTI_TURN_CATEGORIES}}
+        weights = {**DEFAULT_WEIGHTS, **
+                   {cat: 0.0 for cat in MULTI_TURN_CATEGORIES}}
 
     runner_cfg = RunnerConfig(
         model_name_or_path=args.model,
@@ -473,4 +535,5 @@ if __name__ == "__main__":
         weights=weights,
         capture_activations=args.capture_activations,
         checkpoint_dir=args.checkpoint_dir,
+        counts=args.counts,
     )

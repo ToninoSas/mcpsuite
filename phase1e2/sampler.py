@@ -117,6 +117,84 @@ def proportional_sample(
     return selected
 
 
+def exact_sample(
+    corpus: dict[str, list[BFCLSample]],
+    counts: dict[str, int],
+    seed: int = 42,
+    filter_fn: Callable[[BFCLSample], bool] | None = None,
+) -> list[BFCLSample]:
+    """
+    Campiona esattamente `counts[cat]` sample per ogni categoria specificata.
+
+    Args:
+        corpus:    output di loader.load_all()
+        counts:    dict {categoria: numero_esatto_di_sample}. Categorie
+                   non presenti nel dict vengono escluse (0 sample).
+        seed:      seme random per riproducibilità
+        filter_fn: funzione opzionale per escludere sample (es. quelli senza GT)
+
+    Returns:
+        Lista di BFCLSample mescolati casualmente, pronti per l'inferenza.
+
+    Raises:
+        ValueError: se `counts` è vuoto o ha valori negativi.
+    """
+    if not counts:
+        raise ValueError("counts non può essere vuoto")
+    if any(n < 0 for n in counts.values()):
+        raise ValueError(f"counts non può contenere valori negativi: {counts}")
+
+    rng = random.Random(seed)
+
+    # Filtra il corpus se necessario, solo per le categorie richieste
+    available: dict[str, list[BFCLSample]] = {}
+    for cat, n_req in counts.items():
+        if n_req == 0:
+            continue
+        if cat not in corpus:
+            print(
+                f"[sampler] ⚠️  Categoria '{cat}' non presente nel corpus, ignorata")
+            continue
+        pool = [s for s in corpus[cat] if filter_fn(
+            s)] if filter_fn else list(corpus[cat])
+        if not pool:
+            print(
+                f"[sampler] ⚠️  Categoria '{cat}' vuota dopo il filtro, ignorata")
+            continue
+        available[cat] = pool
+
+    # Campiona, cappando alla disponibilità reale
+    selected: list[BFCLSample] = []
+    stats: dict[str, tuple[int, int]] = {}  # cat → (richiesti, effettivi)
+
+    for cat, pool in available.items():
+        n_req = counts[cat]
+        n_eff = min(n_req, len(pool))
+        if n_eff < n_req:
+            print(
+                f"[sampler] ⚠️  Categoria '{cat}': richiesti {n_req}, "
+                f"disponibili solo {n_eff}"
+            )
+        picked = rng.sample(pool, n_eff)
+        selected.extend(picked)
+        stats[cat] = (n_req, n_eff)
+
+    rng.shuffle(selected)
+
+    # Report (stesso stile di proportional_sample)
+    total_req = sum(n for n, _ in stats.values())
+    total_eff = len(selected)
+    print(
+        f"\n[sampler] Budget richiesto: {total_req}  |  Effettivo: {total_eff}")
+    print(f"{'Categoria':<35} {'Richiesti':>10}  {'Effettivi':>10}")
+    print("─" * 62)
+    for cat, (n_req, n_eff) in stats.items():
+        marker = "" if n_req == n_eff else "  ⚠"
+        print(f"  {cat:<33} {n_req:>10}  {n_eff:>10}{marker}")
+    print()
+
+    return selected
+
 def split_train_val_test(
     samples: list[BFCLSample],
     train: float = 0.70,
