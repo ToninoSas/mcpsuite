@@ -31,16 +31,18 @@ from loader import BFCLSample
 
 MODEL_CONFIGS: dict[str, dict] = {
     "qwen": {
-        "model_id":    "Qwen/Qwen3.5-9B",
-        "n_layers":    32,
-        "hidden_size": 4096,
-        "notes":       "Qwen3 thinking mode disabled via enable_thinking=False",
+        "model_id":          "Qwen/Qwen3.5-9B",
+        "n_layers":          32,
+        "hidden_size":       4096,
+        "use_native_tools":  False,   # usa system prompt personalizzato con <tool_call>
+        "notes":             "Qwen3 thinking mode disabled via enable_thinking=False",
     },
     "llama": {
-        "model_id":    "meta-llama/Meta-Llama-3.1-8B-Instruct",
-        "n_layers":    32,
-        "hidden_size": 4096,
-        "notes":       "Same layer/hidden layout as Qwen — classifier unchanged",
+        "model_id":          "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "n_layers":          32,
+        "hidden_size":       4096,
+        "use_native_tools":  True,    # passa tools= al chat template nativo
+        "notes":             "Native tool calling via apply_chat_template(tools=)",
     },
 }
 
@@ -136,6 +138,11 @@ class RunnerConfig:
     # Qwen3.5-9B NF4 ≈ 6.5 GB → cap consigliato: {0: "3500MiB", 1: "3500MiB"}
     # → ~16 layer per GPU, ~12.5 GB liberi per KV cache e attivazioni.
     max_memory: dict | None  = None
+    # Se True, usa il chat template nativo del modello per il tool calling
+    # (passa tools= a apply_chat_template invece del system prompt personalizzato).
+    # Usare True per Llama-3.1 e modelli con tool calling nativo ben definito.
+    # Usare False (default) per Qwen e modelli che seguono il system prompt.
+    use_native_tools: bool   = False
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -164,18 +171,18 @@ def build_system_message(sample: BFCLSample) -> dict:
     }
 
 
-def build_prompt(sample: BFCLSample) -> list[dict]:
+def build_prompt(sample: BFCLSample, use_native_tools: bool = False) -> list[dict]:
     """
     Costruisce la lista di messaggi (format chat) per un BFCLSample.
 
-    Per single-turn: system + un singolo user message.
-    Per multi-turn:  concatena tutti i turni (usato solo per inferenza single-pass).
-                     Usa run_multi_turn_inference() per la valutazione corretta.
+    use_native_tools=False (Qwen):  system message con schemi funzioni + user turns
+    use_native_tools=True  (Llama): solo user turns — gli schemi vengono passati
+                                    via tools= in apply_chat_template
     """
-    messages = [build_system_message(sample)]
+    messages = [] if use_native_tools else [build_system_message(sample)]
 
     # sample.question: list[list[dict]] — ogni inner list è un turno
-    # I messaggi system nelle live categories vengono saltati: usiamo il nostro
+    # I messaggi system nelle live categories vengono saltati
     for turn in sample.question:
         for msg in turn:
             if msg.get("role") == "system":
@@ -204,7 +211,9 @@ def run_multi_turn_inference(
     Returns:
         Lista di output raw del modello, uno per turno.
     """
-    messages: list[dict] = [build_system_message(sample)]
+    use_native = getattr(getattr(runner, "config", None), "use_native_tools", False)
+    tools = sample.functions if use_native else None
+    messages: list[dict] = [] if use_native else [build_system_message(sample)]
     outputs: list[str] = []
     n_turns = len(sample.question)
 
@@ -217,12 +226,11 @@ def run_multi_turn_inference(
 
         is_last = (turn_idx == n_turns - 1)
         if capture_activations and is_last and hasattr(runner, "generate_with_hidden_state"):
-            raw_output, activations = runner.generate_with_hidden_state(messages)
+            raw_output, activations = runner.generate_with_hidden_state(messages, tools=tools)
             if activations is not None:
-                # shape: (num_layers, hidden_size) float16
                 sample.hidden_vec = activations
         else:
-            raw_output = runner.generate(messages)
+            raw_output = runner.generate(messages, tools=tools)
 
         outputs.append(raw_output)
 
@@ -295,33 +303,32 @@ class TransformersRunner:
         self._loaded = True
         print("[runner] Modello caricato ✓")
 
-    def generate(self, messages: list[dict]) -> str:
+    def _apply_template(self, messages: list[dict], tools: list | None = None) -> str:
+        """
+        Applica il chat template corretto in base al modello.
+
+        use_native_tools=False (Qwen): tenta enable_thinking=False, fallback senza.
+        use_native_tools=True  (Llama): passa tools= al template nativo.
+        """
+        kwargs = dict(tokenize=False, add_generation_prompt=True)
+        if tools is not None:
+            kwargs["tools"] = tools
+            return self.tokenizer.apply_chat_template(messages, **kwargs)
+        # Qwen: disabilita thinking mode
+        try:
+            return self.tokenizer.apply_chat_template(messages, **kwargs, enable_thinking=False)
+        except TypeError:
+            return self.tokenizer.apply_chat_template(messages, **kwargs)
+
+    def generate(self, messages: list[dict], tools: list | None = None) -> str:
         """Genera la risposta dato un prompt in formato chat."""
         if not self._loaded:
             self.load()
 
         import torch
-
-        # Applica il chat template di Qwen
-        # enable_thinking=False: disabilita la thinking mode di Qwen3
-        # (evita blocchi <think>...</think> che rallentano e non servono qui)
-        try:
-            text = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-            )
-        except TypeError:
-            text = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
+        text   = self._apply_template(messages, tools=tools)
         inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
 
-        # Tronca a sinistra se la sequenza supera max_seq_len.
-        # Mantiene i token più recenti (fine della conversazione).
         if self.config.max_seq_len and inputs["input_ids"].shape[1] > self.config.max_seq_len:
             inputs = {k: v[:, -self.config.max_seq_len:] for k, v in inputs.items()}
 
@@ -335,13 +342,13 @@ class TransformersRunner:
                 pad_token_id=self.tokenizer.eos_token_id,
             )
 
-        # Taglia il prompt dall'output
         new_tokens = output_ids[0][inputs["input_ids"].shape[1]:]
         return self.tokenizer.decode(new_tokens, skip_special_tokens=True)
 
     def generate_with_hidden_state(
         self,
         messages: list[dict],
+        tools: list | None = None,
     ) -> tuple[str, "np.ndarray | None"]:
         """
         Come generate(), ma cattura l'ultimo token del prefill per ogni layer.
@@ -382,19 +389,7 @@ class TransformersRunner:
             for i, layer in enumerate(self.model.model.layers)
         ]
 
-        try:
-            text = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-                enable_thinking=False,
-            )
-        except TypeError:
-            text = self.tokenizer.apply_chat_template(
-                messages,
-                tokenize=False,
-                add_generation_prompt=True,
-            )
+        text   = self._apply_template(messages, tools=tools)
         inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
 
         if self.config.max_seq_len and inputs["input_ids"].shape[1] > self.config.max_seq_len:
@@ -552,19 +547,22 @@ def run_inference_on_samples(
                 continue
 
             try:
+                use_native = getattr(getattr(runner, "config", None), "use_native_tools", False)
+                tools = sample.functions if use_native else None
+
                 if sample.category in MULTI_TURN_CATEGORIES:
                     sample.model_raw_output = run_multi_turn_inference(
                         sample, runner, capture_activations=capture_activations
                     )
                 else:
-                    messages = build_prompt(sample)
+                    messages = build_prompt(sample, use_native_tools=use_native)
                     if capture_activations:
-                        raw_output, activations = runner.generate_with_hidden_state(messages)
+                        raw_output, activations = runner.generate_with_hidden_state(messages, tools=tools)
                         sample.model_raw_output = raw_output
                         if activations is not None:
                             sample.hidden_vec = activations
                     else:
-                        sample.model_raw_output = runner.generate(messages)
+                        sample.model_raw_output = runner.generate(messages, tools=tools)
 
             except torch.cuda.OutOfMemoryError:
                 print(f"[runner] ✗ OOM {sample.id} (seq troppo lunga?) — pulisco e continuo")

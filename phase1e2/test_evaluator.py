@@ -45,6 +45,31 @@ class TestParser:
         assert len(calls) == 1
         assert calls[0]["name"] == "greet"
 
+    def test_llama_tag_format_with_name_key(self):
+        # Llama usa il nome funzione come tag, JSON contiene "name" + "arguments"
+        raw = '<calculate_compound_interest>\n{"name": "calculate_compound_interest", "arguments": {"principle": 10000, "interest_rate": 0.05, "time": 10}}\n</calculate_compound_interest>'
+        calls = _extract_calls_from_output(raw)
+        assert len(calls) == 1
+        assert calls[0]["name"] == "calculate_compound_interest"
+        assert calls[0]["arguments"]["principle"] == 10000
+
+    def test_llama_tag_format_dotted_name_no_name_key(self):
+        # Llama con nome puntato (game_rewards.get): JSON senza "name" key
+        raw = '<game_rewards.get>\n{"game": "Fortnite", "platform": "Playstation"}\n</game_rewards.get>'
+        calls = _extract_calls_from_output(raw)
+        assert len(calls) == 1
+        assert calls[0]["name"] == "game_rewards.get"
+        assert calls[0]["arguments"]["game"] == "Fortnite"
+        assert calls[0]["arguments"]["platform"] == "Playstation"
+
+    def test_llama_tag_format_evaluate_correct(self):
+        # Verifica end-to-end: output Llama con nome puntato → label=0
+        gt = [{"game_rewards.get": {"game": ["Fortnite"], "platform": ["Playstation", "PS"], "mission": [""], "trophy": [""]}}]
+        raw = '<game_rewards.get>\n{"game": "Fortnite", "platform": "Playstation"}\n</game_rewards.get>'
+        r = evaluate(raw, gt)
+        assert r.label == 0
+        assert r.hallucination_type is None
+
     def test_no_call_empty(self):
         assert _extract_calls_from_output("") == []
         assert _extract_calls_from_output("I cannot help with that.") == []

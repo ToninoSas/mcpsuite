@@ -56,6 +56,8 @@ def _extract_calls_from_output(raw: str) -> list[dict]:
       • JSON single:         {"name": "func", "arguments": {...}}
       • Tool-call block:     ```json\n[...]\n```
       • Qwen native format:  <tool_call>{"name": ..., "arguments": ...}</tool_call>
+      • Llama native format: <func_name>{"arg": val}</func_name>  (nome funzione come tag,
+                             gestisce nomi con punti es. game_rewards.get)
     """
     calls: list[dict] = []
 
@@ -80,6 +82,43 @@ def _extract_calls_from_output(raw: str) -> list[dict]:
                 pass
         if calls:
             return calls
+
+    # ── 1b. Llama native <function_name>json</function_name> format ───────────
+    # Llama-3.1 usa il nome della funzione come tag XML invece di <tool_call>.
+    # Gestisce anche nomi con punti (es. game_rewards.get) non validi come XML.
+    # Tre sotto-casi per il JSON dentro il tag:
+    #   a) {"name": "f", "arguments": {...}}  → formato standard
+    #   b) {"name": "f", "arg1": v, ...}      → nome nel JSON, resto = args
+    #   c) {"arg1": v, ...}                   → nessun "name" → usa il tag name
+    for m in re.finditer(r'<([A-Za-z_][\w.]*?)>([\s\S]*?)</[A-Za-z_][\w.]*?>', raw):
+        tag_name = m.group(1)
+        if tag_name.lower() == "tool_call":
+            continue
+        body = m.group(2).strip()
+        try:
+            obj = json.loads(body)
+            if not isinstance(obj, dict):
+                continue
+            if "name" in obj and "arguments" in obj:
+                name = obj["name"]
+                args = obj["arguments"]
+            elif "name" in obj:
+                name = obj["name"]
+                args = {k: v for k, v in obj.items() if k != "name"}
+            else:
+                name = tag_name
+                args = obj
+            if isinstance(args, str):
+                try:
+                    args = json.loads(args)
+                except Exception:
+                    args = {}
+            if name:
+                calls.append({"name": name, "arguments": args})
+        except Exception:
+            pass
+    if calls:
+        return calls
 
     # ── 2. JSON fenced block ──────────────────────────────────────────────────
     fence = re.search(r"```(?:json)?\s*\n([\s\S]*?)\n```", raw)

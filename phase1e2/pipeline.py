@@ -29,7 +29,6 @@ Uso:
 from __future__ import annotations
 
 import argparse
-import dataclasses
 import json
 import sys
 import time
@@ -452,6 +451,9 @@ def parse_args() -> argparse.Namespace:
                    default=None,     help="Sample totali (default 2000; ignorato se --counts è passato)")
     p.add_argument("--model",           default="Qwen/Qwen3.5-9B",
                    help="HuggingFace model ID. Es: Qwen/Qwen3.5-9B o meta-llama/Meta-Llama-3.1-8B-Instruct")
+    p.add_argument("--use_native_tools", action="store_true",
+                   help="Usa il formato tool calling nativo del modello (tools= in apply_chat_template). "
+                        "Obbligatorio per Llama-3.1. Default: False (system prompt personalizzato per Qwen).")
     p.add_argument("--backend",         default="transformers",
                    choices=["transformers", "llama_cpp"])
     p.add_argument("--max_new_tokens",  type=int, default=512)
@@ -522,6 +524,7 @@ if __name__ == "__main__":
         backend=args.backend,
         max_new_tokens=args.max_new_tokens,
         max_seq_len=args.max_seq_len,
+        use_native_tools=args.use_native_tools,
     )
 
     run_pipeline(
