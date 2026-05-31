@@ -1,6 +1,12 @@
 # Phase 1 — Implementation Notes
 
-## Status: ✅ Complete (25/25 tests passing)
+## Status: ✅ Complete (28/28 evaluator tests + 10/10 sampler tests passing)
+
+The pipeline supports **two models** through the same code path:
+
+- `Qwen/Qwen3.5-9B` — system-prompt-driven tool calling with `<tool_call>` tag
+- `meta-llama/Meta-Llama-3.1-8B-Instruct` — native `apply_chat_template(tools=)`
+  via the `--use_native_tools` flag
 
 ---
 
@@ -23,10 +29,18 @@ when `capture_activations=True`.
 
 ### `sampler.py`
 
-Proportional sampling with configurable per-category weights defined in
-`DEFAULT_WEIGHTS`. Uses `random.sample` with a fixed seed for reproducibility.
-Stratified train/val/test split (70/15/15) preserves category distribution
-within each split.
+Due modalità di campionamento, mutuamente esclusive:
+
+- `proportional_sample(samples, total, weights, seed)` — *legacy*: distribuisce
+  un budget totale `total` in base ai pesi per categoria. Fix di compatibilità
+  garantito.
+- `exact_sample(samples, counts, seed)` — *raccomandata*: prende esattamente
+  `counts[category]` campioni per ciascuna categoria specificata. Elimina
+  ambiguità nel report finale di campioni effettivi per categoria.
+
+Entrambe usano `random.sample` con seed fisso per riproducibilità. Lo split
+stratificato train/val/test (70/15/15) preserva la distribuzione di categoria
+all'interno di ogni split.
 
 ### `evaluator.py`
 
@@ -34,6 +48,12 @@ The heart of Phase 1. Fully deterministic, no external API calls.
 
 **Parser pipeline** (tries in order, returns on first success):
 1. Qwen native `<tool_call>{...}</tool_call>` tag
+1b. **Llama-style `<function_name>{json}</function_name>`** (regex relax che
+    accetta nomi puntati come `game_rewards.get` — XML non valido ma comune nel
+    fallback Llama). Gestisce tre sotto-casi:
+   - JSON con `name` + `arguments`
+   - JSON con `name` solo, tutti gli altri campi diventano arguments
+   - JSON senza `name`, il tag stesso diventa il nome funzione
 2. JSON fenced block (` ```json ``` `)
 3. JSON inline (finds first `[` or `{` and extracts balanced structure)
 4. Python call-string with balanced-parenthesis extractor
@@ -70,24 +90,57 @@ label=1  →  hallucination_type ∈ {
 ```
 
 **Note**: `INFERENCE_ERROR` samples must be **filtered out before classifier
-training** — they carry no meaningful residual stream signal.
+training** — they carry no meaningful residual stream signal. Already handled
+by `ActivationDataset(filter_inference_errors=True)`.
 
 ### `runner.py`
 
-Wraps HuggingFace `transformers` + `bitsandbytes` (NF4 4-bit).
+Wraps HuggingFace `transformers` + `bitsandbytes` (NF4 4-bit). Supporta
+qualsiasi modello con architettura transformer decoder caricabile via
+`AutoModelForCausalLM`.
+
+**`MODEL_CONFIGS` registry** (chiave → metadata):
+
+```python
+MODEL_CONFIGS = {
+    "qwen": {
+        "model_id":         "Qwen/Qwen3.5-9B",
+        "n_layers":         32, "hidden_size": 4096,
+        "use_native_tools": False,   # system prompt custom con <tool_call>
+    },
+    "llama": {
+        "model_id":         "meta-llama/Meta-Llama-3.1-8B-Instruct",
+        "n_layers":         32, "hidden_size": 4096,
+        "use_native_tools": True,    # apply_chat_template(tools=...)
+    },
+}
+```
 
 **`RunnerConfig`** key fields:
 ```python
-max_seq_len: int | None = None        # truncate input to last N tokens (3072 on T4 16GB)
-attn_implementation: str | None = "sdpa"  # PyTorch SDPA for memory-efficient attention
+model_name_or_path: str  = "Qwen/Qwen3.5-9B"
+max_seq_len:        int | None = None       # truncate input to last N tokens (3072 on T4 16GB)
+attn_implementation: str | None = "sdpa"   # PyTorch SDPA for memory-efficient attention
+use_native_tools:   bool  = False           # passa tools= al chat template nativo
 ```
+
+**`_apply_template()`** — instrada tra il template nativo e quello Qwen-style:
+- Se `tools is not None` → `apply_chat_template(messages, tools=tools, ...)`
+- Altrimenti → `apply_chat_template(messages, enable_thinking=False, ...)`
+  con fallback `TypeError` per modelli che non supportano `enable_thinking`.
+
+**`build_prompt(sample, use_native_tools)`** — costruisce la lista messaggi:
+- `use_native_tools=False`: prepende il system message con gli schemi funzione
+- `use_native_tools=True`: omette il system message (sarà generato dal template
+  nativo a partire dalle tools); skippa anche eventuali system message
+  *interni* ai turni della domanda (categorie live)
 
 **`generate_with_hidden_state()`** — captures the last token of the prefill
 from every transformer layer simultaneously:
 
 ```python
-def generate_with_hidden_state(self, messages) -> tuple[str, np.ndarray | None]:
-    # Registers one forward hook per layer (32 total for Qwen3.5-9B)
+def generate_with_hidden_state(self, messages, tools=None) -> tuple[str, np.ndarray | None]:
+    # Registers one forward hook per layer (32 total for Qwen3.5-9B / Llama-3.1-8B)
     # Each hook fires during prefill (seq_len > 1), captures hidden[0, -1, :]
     # and immediately moves it to CPU float16 (VRAM not accumulated)
     # Returns (raw_output_string, activations)
@@ -100,6 +153,8 @@ Key design points:
 - Each captured tensor is moved to CPU immediately → only ~262 KB per sample in RAM
 - `attn_implementation="sdpa"` reduces attention memory from O(n²) to O(n)
 - `max_seq_len` truncates from the left (keeps most recent context) before tokenization
+- Quando `use_native_tools=True`, `tools=sample.functions` viene passato al
+  template; altrimenti il system message custom è già nel prompt
 
 **Dual-GPU parallelism** (`run_inference_parallel`):
 - Models are loaded **sequentially** (bitsandbytes is not thread-safe)
@@ -117,28 +172,38 @@ Key design points:
 
 CLI orchestrator. Runs steps 1-6 in sequence:
 1. `load_all()` — load corpus
-2. `proportional_sample()` — sample with configurable category weights
-3. `run_inference_on_samples()` / `run_inference_parallel()` — Qwen inference,
+2. `exact_sample()` / `proportional_sample()` — sample con conteggi esatti o pesi
+3. `run_inference_on_samples()` / `run_inference_parallel()` — inferenza,
    optionally with activation capture
 4. `evaluate()` per sample — assign labels + hallucination type
 5. Write `labeled_dataset.jsonl` + `splits/`
 6. If `--capture_activations`: write `activations/{split}/X.npy` + `y.npy` +
    `meta.jsonl` + `shape.json`
 
-**New CLI flags**:
+**CLI flags principali**:
 ```
+--model PATH            model id HuggingFace o path locale (default Qwen/Qwen3.5-9B)
+--use_native_tools      attiva il template nativo (richiesto per Llama-3.1)
 --capture_activations   capture hidden states from all layers during inference
 --max_seq_len N         truncate input sequences to last N tokens (use 3072 on T4)
 --num_gpus N            data-parallel inference across N GPUs
---weights '{...}'       per-category sampling weights as JSON string
+--counts JSON           conteggi esatti per categoria (mutuamente esclusivo con --total/--weights)
+--total N               numero totale di sample
+--weights JSON          pesi per categoria
 --no_multi_turn         zero-weight all multi-turn categories (quick single-turn run)
+--checkpoint_dir DIR    abilita ripresa automatica da checkpoint
+--seed N                seed di campionamento e split (default 42)
 ```
 
 **Metrics**: at the end of every run the pipeline prints and saves `metrics.json`:
+- Campo `"model"`: model id o path usato (tracciabilità multi-modello)
 - Overall accuracy and hallucination rate
 - Per-category breakdown (N, accuracy, hallucination rate, top hallucination type)
 - Wall-clock timing per phase (load, sample, inference, eval, save, activations)
 - Inference throughput (samples/s)
+
+`shape.json` in `activations/{split}/` include anch'esso il campo `model` per
+permettere a Phase 3/Phase 4 di tracciare la provenienza dei dati.
 
 ---
 
@@ -150,7 +215,7 @@ outputs/activations/
     X.npy       float16, shape (N_train, 32, 4096)
     y.npy       int8,    shape (N_train,)
     meta.jsonl  one JSON per row: id, category, hallucination_type
-    shape.json  {"X_shape": [N, 32, 4096], "num_layers": 32, "hidden_size": 4096, ...}
+    shape.json  {"X_shape": [N, 32, 4096], "num_layers": 32, "hidden_size": 4096, "model": "...", ...}
   val/   (same structure)
   test/  (same structure)
 ```
@@ -167,7 +232,8 @@ of sample `i`. Shape `(32, 4096)` per sample.
   only response-based matching. This may inflate false negatives on multi-turn.
 
 - `INFERENCE_ERROR` samples (OOM, CUDA crash) have `label=1` but carry no
-  meaningful hidden state. Filter them before classifier training.
+  meaningful hidden state. Filter them before classifier training
+  (automatico via `ActivationDataset`).
 
 - `execution_result_type: "real_time"` samples are evaluated with AST matching,
   which may not be accurate. Consider filtering these.
@@ -175,5 +241,8 @@ of sample `i`. Shape `(32, 4096)` per sample.
 - With `max_seq_len=3072` on multi-turn, long conversation history is truncated
   from the left. The model loses early context but the most recent turns are kept.
 
-- Qwen's tool-call format may vary between model versions. The parser handles
-  4 formats; new variants fall back to `NO_CALL_MADE`.
+- Tool-call format varies per modello. Il parser gestisce 4 formati (Qwen
+  `<tool_call>`, Llama `<function_name>`, JSON fenced/inline, Python call-string);
+  formati nuovi non riconosciuti producono `NO_CALL_MADE`. Per Llama-3.1
+  è **obbligatorio** usare `--use_native_tools` per evitare format mismatch
+  sistematici.

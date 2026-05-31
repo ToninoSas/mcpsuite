@@ -92,15 +92,6 @@ class ActivationDataset(Dataset):
         return self.X[idx], self.y[idx]
 
     @property
-    def pos_weight(self) -> torch.Tensor:
-        """pos_weight = n_neg / n_pos  for BCELoss."""
-        n_pos = self.y.sum().item()
-        n_neg = len(self.y) - n_pos
-        if n_pos == 0:
-            return torch.tensor(1.0)
-        return torch.tensor(n_neg / n_pos)
-
-    @property
     def class_counts(self) -> dict[str, int]:
         n_pos = int(self.y.sum().item())
         return {"neg": len(self.y) - n_pos, "pos": n_pos}

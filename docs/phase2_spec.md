@@ -7,7 +7,7 @@
 ## What changed from the original spec
 
 Phase 2 (activation capture) is **no longer a separate script**.
-It is fully integrated into `phase1/pipeline.py` via the
+It is fully integrated into `phase1e2/pipeline.py` via the
 `--capture_activations` flag, which triggers step 1.6 of the pipeline.
 
 There is no `capture.py` to write. Running the pipeline with
@@ -34,6 +34,11 @@ rather than assuming the last layer is always best.
 - VRAM cost: ~0 (one tensor at a time; previous layer already freed)
 - CPU RAM cost per sample: 32 × 4096 × 2 bytes = 262 KB
 
+L'implementazione è **model-agnostic**: funziona per qualsiasi architettura
+con `model.model.layers[]` (Qwen3.5-9B e Llama-3.1-8B-Instruct hanno entrambi
+32 layer e hidden_size=4096, quindi il formato di output `(N, 32, 4096)` è
+identico tra i due modelli).
+
 ---
 
 ## Storage layout (produced by pipeline.py step 1.6)
@@ -44,7 +49,7 @@ outputs/activations/
     X.npy       float16, shape (N_train, 32, 4096)
     y.npy       int8,    shape (N_train,)
     meta.jsonl  one JSON per row: id, category, hallucination_type
-    shape.json  {"X_shape": [N, 32, 4096], "num_layers": 32, "hidden_size": 4096, ...}
+    shape.json  {"X_shape": [N, 32, 4096], "num_layers": 32, "hidden_size": 4096, "model": "...", ...}
   val/
     X.npy / y.npy / meta.jsonl / shape.json
   test/
@@ -52,6 +57,9 @@ outputs/activations/
 ```
 
 `X[i, j, :]` = last-token hidden state of layer `j` during prefill of sample `i`.
+
+Il campo `model` in `shape.json` traccia la provenienza dei dati (utile quando
+si confrontano esperimenti Qwen vs Llama).
 
 Expected sizes for 2000 samples (70/15/15 split):
 - Train X.npy: 1400 × 32 × 4096 × 2 bytes ≈ **368 MB**
@@ -63,19 +71,28 @@ Expected sizes for 2000 samples (70/15/15 split):
 ## How to run
 
 ```bash
-cd phase1
+cd phase1e2
 
+# Qwen (default, system prompt custom)
 python pipeline.py \
     --data_dir ./data \
-    --output   ./outputs/labeled_dataset.jsonl \
-    --total    2000 \
+    --output   ../outputs/single_turn/labeled_dataset.jsonl \
+    --model    Qwen/Qwen3.5-9B \
     --num_gpus 2 \
     --max_seq_len 3072 \
     --capture_activations \
-    --weights '{"simple":0.20,"multiple":0.15,"parallel":0.10,
-                "parallel_multiple":0.05,"multi_turn_base":0.15,
-                "multi_turn_miss_func":0.15,"multi_turn_miss_param":0.15,
-                "multi_turn_long_context":0.0,"multi_turn_composite":0.05}'
+    --counts '{"simple":400,"multiple":200,"parallel":200,"parallel_multiple":200}'
+
+# Llama-3.1 (richiede --use_native_tools per il template nativo)
+python pipeline.py \
+    --data_dir ./data \
+    --output   ../outputs/llama/standard/labeled_dataset.jsonl \
+    --model    meta-llama/Meta-Llama-3.1-8B-Instruct \
+    --use_native_tools \
+    --num_gpus 2 \
+    --max_seq_len 3072 \
+    --capture_activations \
+    --counts '{"simple":400,"multiple":200,"parallel":200,"parallel_multiple":200}'
 ```
 
 `--max_seq_len 3072` is required on Kaggle T4 (16 GB VRAM) to prevent OOM
@@ -84,21 +101,26 @@ causes `cudaErrorIllegalAddress` on subsequent samples.
 
 ---
 
-## What still needs to be built (for Phase 3)
+## Phase 3 — built and complete
 
 ```
-phase2/
-  dataset.py   ← PyTorch Dataset over X.npy / y.npy with layer selection
-  train.py     ← 32 independent MLP classifiers, one per layer; AUROC plot
+phase3/
+  dataset.py            ← PyTorch Dataset over X.npy / y.npy with layer selection,
+                          filtra automaticamente i sample INFERENCE_ERROR
+  merge_activations.py  ← merge di train/val/test e metrics.json da due sorgenti
+  train.py              ← 32 independent MLP classifiers (5-fold CV stratificata,
+                          set_seed(seed + layer_idx) per riproducibilità per-layer)
+  plot_comparison.py    ← confronto tra due esperimenti (es. Qwen vs Llama)
 ```
 
-See `docs/roadmap.md` Phase 3 for the full classifier spec.
+See `docs/roadmap.md` Phase 3 per la spec completa.
 
 ---
 
 ## Pre-training data cleaning
 
-Before training classifiers, filter out `INFERENCE_ERROR` samples:
+Before training classifiers, filter out `INFERENCE_ERROR` samples
+(già gestito di default da `ActivationDataset(filter_inference_errors=True)`):
 
 ```python
 import json, numpy as np

@@ -10,10 +10,13 @@ data/
   BFCL_v3_multiple.json              ← multiple functions, one correct
   BFCL_v3_parallel.json              ← one function, multiple simultaneous calls
   BFCL_v3_parallel_multiple.json     ← multiple functions, multiple calls
+  BFCL_v3_live_multiple.json         ← real-world: one correct out of N
+  BFCL_v3_live_parallel.json         ← real-world: parallel calls
+  BFCL_v3_live_parallel_multiple.json
   BFCL_v3_multi_turn_base.json       ← multi-turn, complete information given
   BFCL_v3_multi_turn_miss_func.json  ← multi-turn, function unavailable
   BFCL_v3_multi_turn_miss_param.json ← multi-turn, parameter underspecified
-  BFCL_v3_multi_turn_long_context.json
+  BFCL_v3_multi_turn_long_context.json  ← escluso (troppo lungo per T4)
   BFCL_v3_multi_turn_composite.json
   possible_answer/
     BFCL_v3_simple.json              ← ground truth for simple
@@ -62,6 +65,9 @@ Notes:
 - `function` is a list even when only one function is available.
 - Field is named `"function"` (not `"functions"`) in the raw BFCL files.
   `loader.py` reads it as `rec.get("function", [])` and stores as `sample.functions`.
+- Le categorie `live_*` possono includere `role: "system"` messages incorporati
+  nei turni. `build_prompt()` li scarta per evitare conflitto con il system
+  prompt custom (Qwen) o con il template nativo (Llama).
 
 ---
 
@@ -113,15 +119,20 @@ The GT is a **list of Python call strings** here, not dicts.
 ## Labeled dataset format (Phase 1 output)
 
 ```
-phase1/outputs/
+outputs/<experiment>/
   labeled_dataset.jsonl          ← full dataset
+  metrics.json                   ← per-run metrics (vedi sotto)
   splits/
     train.jsonl                  ← 70% stratified by category
     val.jsonl                    ← 15%
     test.jsonl                   ← 15%
+  activations/                   ← solo se --capture_activations
+    train/X.npy + y.npy + meta.jsonl + shape.json
+    val/...
+    test/...
 ```
 
-Each line of every file:
+Each line of every `*.jsonl` file:
 
 ```jsonc
 {
@@ -172,21 +183,93 @@ Each line of every file:
 
 ---
 
+## `metrics.json` (Phase 1 output)
+
+```jsonc
+{
+  "model": "Qwen/Qwen3.5-9B",          // o "meta-llama/Meta-Llama-3.1-8B-Instruct"
+  "total": 1000,
+  "n_correct": 917,
+  "n_halluc": 83,
+  "accuracy": 0.917,
+  "hallucination_rate": 0.083,
+  "hallucination_types": {
+    "WRONG_ARG_VALUES": 30,
+    "WRONG_FUNCTION":   25,
+    "NO_CALL_MADE":     10,
+    "MISSING_ARGS":      8,
+    "EXTRA_ARGS":        5,
+    "WRONG_CALL_COUNT":  5
+  },
+  "per_category": {
+    "simple": {
+      "n": 400, "n_correct": 372, "n_halluc": 28,
+      "accuracy": 0.93, "hallucination_rate": 0.07,
+      "hallucination_types": { /* ... */ }
+    },
+    /* ... per category ... */
+  },
+  "splits": {"train": 700, "val": 150, "test": 150},
+  "timings_sec": {
+    "load": 0.7, "sample": 0.0, "inference": 1200.3,
+    "eval": 0.5, "save": 0.4, "activations": 0.6, "total": 1202.5
+  },
+  "inference_samples_per_sec": 0.83
+}
+```
+
+Il campo `"model"` è stato aggiunto con il supporto multi-modello: serve a
+tracciare la provenienza dei dati di una run quando si confrontano esperimenti
+Qwen vs Llama.
+
+---
+
 ## Activation dataset format (Phase 2 output)
 
 ```
-phase2/outputs/
+outputs/<experiment>/activations/
   train/
-    X.npy          numpy array, float16, shape (N, 4096)
+    X.npy          numpy array, float16, shape (N, 32, 4096)
     y.npy          numpy array, int8,    shape (N,)
     meta.jsonl     one JSON per row: {"id": "...", "category": "...", "hallucination_type": "..."}
-    progress.json  {"processed_ids": ["simple_0", "simple_1", ...]}
+    shape.json     {"X_shape": [N, 32, 4096], "num_layers": 32, "hidden_size": 4096, "model": "..."}
   val/             same structure
   test/            same structure
 ```
 
 Row `i` of `X.npy` corresponds to row `i` of `y.npy` and line `i` of `meta.jsonl`.
 The ordering matches the order in the source split JSONL.
+
+Il campo `"model"` in `shape.json` permette di distinguere attivazioni Qwen
+da Llama quando si caricano dataset da sorgenti diverse.
+
+---
+
+## Phase 3 `metrics.json` (training output)
+
+Schema attuale (con seed riproducibile):
+
+```jsonc
+{
+  "seed": 42,
+  "layers": [
+    {
+      "layer": 0,
+      "cv_auroc_mean": 0.612, "cv_auroc_std": 0.024,
+      "fold_aurocs": [0.601, 0.625, 0.589, 0.633, 0.610],
+      "cv_accuracy_mean": 0.687, "cv_accuracy_std": 0.018,
+      "fold_accuracies": [/* ... */],
+      "mean_epochs": 23,
+      "n_cv_pool": 1267,
+      "pos_cv_pool": 148
+    },
+    /* ... un entry per ogni layer 0..31 ... */
+  ]
+}
+```
+
+`plot_comparison.py` accetta anche il vecchio formato (lista piatta senza il
+wrapper `{"seed": ..., "layers": ...}`).
 
 ---
 
@@ -198,10 +281,13 @@ The ordering matches the order in the source split JSONL.
 | multiple | 200 | AST |
 | parallel | 200 | AST |
 | parallel_multiple | 50 | AST |
+| live_multiple | 1000+ | AST |
+| live_parallel | ~16 | AST |
+| live_parallel_multiple | ~24 | AST |
 | multi_turn_base | 200 | State-based |
 | multi_turn_miss_func | 200 | Response-based |
 | multi_turn_miss_param | 200 | Response-based |
-| multi_turn_long_context | 200 | State-based |
+| multi_turn_long_context | 200 | State-based (escluso) |
 | multi_turn_composite | 200 | State-based |
 
 Note: multi-turn state-based evaluation is not fully implemented in Phase 1
