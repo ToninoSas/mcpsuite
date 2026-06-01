@@ -70,6 +70,57 @@ class TestParser:
         assert r.label == 0
         assert r.hallucination_type is None
 
+    def test_llama_parallel_semicolon_separated(self):
+        # Llama-3.1 emette parallel calls come {...}; {...} (formato nativo)
+        raw = (
+            '{"name": "alimony_calculator.ca.calculate", '
+            '"parameters": {"duration": "10", "payor_income": "10000", "recipient_income": "3000"}}; '
+            '{"name": "alimony_calculator.ca.calculate", '
+            '"parameters": {"duration": "20", "payor_income": "10000", "recipient_income": "3000"}}'
+        )
+        calls = _extract_calls_from_output(raw)
+        assert len(calls) == 2
+        assert calls[0]["name"] == "alimony_calculator.ca.calculate"
+        assert calls[0]["arguments"]["duration"] == "10"
+        assert calls[1]["arguments"]["duration"] == "20"
+
+    def test_llama_parallel_three_calls(self):
+        raw = (
+            '{"name": "f", "parameters": {"x": 1}}; '
+            '{"name": "f", "parameters": {"x": 2}}; '
+            '{"name": "f", "parameters": {"x": 3}}'
+        )
+        calls = _extract_calls_from_output(raw)
+        assert len(calls) == 3
+        assert [c["arguments"]["x"] for c in calls] == [1, 2, 3]
+
+    def test_llama_parallel_evaluate_correct(self):
+        # End-to-end: parallel call Llama-style con valori string → label=0
+        # (la type coercion string→int del comparatore fa il resto)
+        gt = [
+            {"alimony_calculator.ca.calculate": {
+                "payor_income": [10000], "recipient_income": [3000], "duration": [10]}},
+            {"alimony_calculator.ca.calculate": {
+                "payor_income": [10000], "recipient_income": [3000], "duration": [20]}},
+        ]
+        raw = (
+            '{"name": "alimony_calculator.ca.calculate", '
+            '"parameters": {"duration": "10", "payor_income": "10000", "recipient_income": "3000"}}; '
+            '{"name": "alimony_calculator.ca.calculate", '
+            '"parameters": {"duration": "20", "payor_income": "10000", "recipient_income": "3000"}}'
+        )
+        r = evaluate(raw, gt, category="parallel")
+        assert r.label == 0
+        assert r.hallucination_type is None
+
+    def test_brace_in_string_not_counted(self):
+        # Una graffa dentro una stringa non deve rompere il counter
+        raw = '{"name": "f", "parameters": {"q": "x{y}z"}}; {"name": "g", "parameters": {}}'
+        calls = _extract_calls_from_output(raw)
+        assert len(calls) == 2
+        assert calls[0]["arguments"]["q"] == "x{y}z"
+        assert calls[1]["name"] == "g"
+
     def test_no_call_empty(self):
         assert _extract_calls_from_output("") == []
         assert _extract_calls_from_output("I cannot help with that.") == []

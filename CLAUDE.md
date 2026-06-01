@@ -157,7 +157,7 @@ mcpsuite/
 │   │                             • parser step 1b per il formato
 │   │                               `<function_name>{json}</function_name>` di Llama
 │   │                               (gestisce nomi puntati come `game_rewards.get`)
-│   ├── test_evaluator.py       ← 28 test unitari (include 3 Llama-format)
+│   ├── test_evaluator.py       ← 32 test unitari (include 7 Llama-format)
 │   └── test_sampler.py         ← 10 test unitari (proportional + exact_sample)
 ├── outputs/
 │   ├── single_turn/            ← Qwen, 1000 campioni standard
@@ -233,6 +233,7 @@ carry no meaningful hidden state (inference never completed).
 1. Qwen `<tool_call>{json}</tool_call>`
 1b. Llama `<function_name>{json}</function_name>` (regex relax, gestisce punti nel nome)
 2. JSON fenced block (` ```json `)
+2b. Llama parallel format `{...}; {...}; ...` (estrazione string-aware di tutti i top-level `{...}`)
 3. JSON inline / array di tool calls
 4. Python call-string con balanced-paren walker
 
@@ -307,7 +308,7 @@ huggingface-cli download gorilla-llm/Berkeley-Function-Calling-Leaderboard \
 
 # Run unit tests (no GPU needed)
 cd phase1e2 && python -m pytest test_evaluator.py test_sampler.py -v
-# Output: 28 + 10 = 38 tests passed
+# Output: 32 + 10 = 42 tests passed
 
 # ── Qwen — single-turn inference, modalità esatta ───────────────────────────
 cd phase1e2 && python pipeline.py \

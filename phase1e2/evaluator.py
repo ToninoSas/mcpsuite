@@ -129,6 +129,23 @@ def _extract_calls_from_output(raw: str) -> list[dict]:
         except Exception:
             pass
 
+    # ── 2b. Llama parallel format:  {...}; {...}; {...} ──────────────────────
+    # Llama-3.1 emette parallel calls come oggetti JSON top-level separati da
+    # ';' (formato nativo di apply_chat_template(tools=...)). Il parser
+    # standard di step 3 estrae solo il primo oggetto → WRONG_CALL_COUNT
+    # sistematico sulle categorie parallel. Qui estraiamo tutti i top-level
+    # {...} bilanciati (string-aware) e li parsiamo indipendentemente.
+    blocks = _extract_top_level_braces(raw)
+    if len(blocks) > 1:
+        for blk in blocks:
+            try:
+                obj = json.loads(blk)
+                calls.extend(_normalize_json_calls(obj))
+            except Exception:
+                pass
+        if calls:
+            return calls
+
     # ── 3. JSON inline ────────────────────────────────────────────────────────
     # Cerca il primo '[' o '{' che apre una struttura valida
     for start_char, end_char in [("[", "]"), ("{", "}")]:
@@ -187,6 +204,53 @@ def _extract_calls_from_output(raw: str) -> list[dict]:
                 calls.append(parsed)
 
     return calls
+
+
+def _extract_top_level_braces(text: str) -> list[str]:
+    """
+    Estrae tutti i top-level {...} bilanciati da `text`, scartando i caratteri
+    in mezzo. Traccia lo stato "dentro stringa" (con escape `\\`) per non
+    contare le graffe che compaiono all'interno di stringhe JSON.
+
+    Usato per il formato parallel di Llama-3.1:
+        {"name": "f", "parameters": {...}}; {"name": "f", "parameters": {...}}
+    """
+    results: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        if text[i] != "{":
+            i += 1
+            continue
+        depth = 0
+        in_string = False
+        escape = False
+        end_idx = -1
+        for j in range(i, n):
+            ch = text[j]
+            if escape:
+                escape = False
+                continue
+            if ch == "\\":
+                escape = True
+                continue
+            if ch == '"':
+                in_string = not in_string
+                continue
+            if in_string:
+                continue
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    end_idx = j
+                    break
+        if end_idx == -1:
+            break
+        results.append(text[i:end_idx + 1])
+        i = end_idx + 1
+    return results
 
 
 def _normalize_json_calls(obj: Any) -> list[dict]:
