@@ -710,6 +710,7 @@ def evaluate_multi_turn(
     turn_outputs: list[str],
     per_turn_gt: list[list[Any]],
     category: str,
+    aggregation_threshold: float | None = None,
 ) -> EvalResult:
     """
     Valuta tutti i turni di un sample multi-turn e restituisce un EvalResult
@@ -718,28 +719,51 @@ def evaluate_multi_turn(
     turn_outputs:  output grezzo del modello, uno per turno
     per_turn_gt:   GT annidato dal file possible_answer (list[list[str]])
     category:      categoria BFCL del sample
+    aggregation_threshold:
+        Soglia per la regola di aggregazione del label multi-turn.
+          • None (default)   → regola any-turn: label=1 se almeno un turno fallisce
+                               (compatibilità all'indietro)
+          • 0.0 ≤ thr ≤ 1.0  → regola "qualified majority": label=1 se la frazione
+                               di turni falliti è >= thr
+                               (es. 0.5 = majority, 0.7 = qualified majority)
 
-    Label aggregato: 1 se almeno un turno allucia, 0 altrimenti.
-    hallucination_type: primo tipo di allucinazione incontrato.
-    eval_details: include il breakdown per turno.
+    hallucination_type: primo tipo di allucinazione incontrato (anche se l'aggregato
+    finisce label=0, il campo riflette il tipo del primo turno fallito — usato per
+    diagnostica, non per il training).
+
+    eval_details: include il breakdown per turno + i campi di aggregazione.
     """
     per_turn_results: list[EvalResult] = []
     for output, turn_gt in zip(turn_outputs, per_turn_gt):
         result = evaluate_turn(output, turn_gt, category)
         per_turn_results.append(result)
 
-    any_halluc = any(r.label == 1 for r in per_turn_results)
+    per_turn_labels = [r.label for r in per_turn_results]
+    n_total  = len(per_turn_labels)
+    n_failed = sum(per_turn_labels)
+    frac_failed = n_failed / n_total if n_total else 0.0
+
+    if aggregation_threshold is None:
+        any_halluc = n_failed > 0
+        rule = "any"
+    else:
+        any_halluc = frac_failed >= aggregation_threshold
+        rule = f"threshold>={aggregation_threshold}"
+
     first_htype = next(
         (r.hallucination_type for r in per_turn_results if r.label == 1),
         None,
     )
 
     details: dict[str, Any] = {
-        "category": category,
-        "n_turns": len(per_turn_results),
-        "per_turn_labels": [r.label for r in per_turn_results],
-        "per_turn_htypes": [r.hallucination_type for r in per_turn_results],
-        "per_turn_details": [r.details for r in per_turn_results],
+        "category":             category,
+        "n_turns":              n_total,
+        "n_failed_turns":       n_failed,
+        "frac_failed":          round(frac_failed, 4),
+        "aggregation_rule":     rule,
+        "per_turn_labels":      per_turn_labels,
+        "per_turn_htypes":      [r.hallucination_type for r in per_turn_results],
+        "per_turn_details":     [r.details for r in per_turn_results],
     }
 
     return EvalResult(

@@ -99,10 +99,17 @@ def _load_dataset(exp_dir: Path) -> tuple[Path, list[dict]]:
 # Re-evaluation
 # ─────────────────────────────────────────────────────────────────────────────
 
-def _reevaluate_record(rec: dict) -> dict:
+def _reevaluate_record(
+    rec: dict,
+    multi_turn_threshold: float | None = None,
+) -> dict:
     """
     Ri-applica evaluate() / evaluate_multi_turn() a un record.
     Restituisce un nuovo dict con label e hallucination_type aggiornati.
+
+    multi_turn_threshold: se non None, applicato come soglia di aggregazione
+    su sample multi-turn (es. 0.7 = label=1 se >=70% dei turni falliscono).
+    Sui sample single-turn è ignorato.
     """
     category = rec.get("category", "")
     raw_output = rec.get("model_raw_output", "")
@@ -112,7 +119,10 @@ def _reevaluate_record(rec: dict) -> dict:
         # multi-turn: raw_output è list[str], gt è list[list[...]]
         turn_outputs = raw_output if isinstance(raw_output, list) else [raw_output]
         per_turn_gt  = gt if (gt and isinstance(gt[0], list)) else [gt]
-        result = evaluate_multi_turn(turn_outputs, per_turn_gt, category)
+        result = evaluate_multi_turn(
+            turn_outputs, per_turn_gt, category,
+            aggregation_threshold=multi_turn_threshold,
+        )
     else:
         # single-turn (incluse live_*)
         if isinstance(raw_output, list):
@@ -301,13 +311,21 @@ def _diff_report(old_records: list[dict], new_records: list[dict]) -> None:
 # Main
 # ─────────────────────────────────────────────────────────────────────────────
 
-def reevaluate_experiment(exp_dir: Path, dry_run: bool = False) -> None:
+def reevaluate_experiment(
+    exp_dir: Path,
+    dry_run: bool = False,
+    multi_turn_threshold: float | None = None,
+) -> None:
     print(f"\n══ Re-evaluation: {exp_dir} ══")
+    if multi_turn_threshold is not None:
+        print(f"  Regola multi-turn: threshold >= {multi_turn_threshold} (B2)")
+    else:
+        print(f"  Regola multi-turn: any-turn (default)")
 
     dataset_path, records = _load_dataset(exp_dir)
     print(f"  Caricati {len(records)} record da {dataset_path.name}")
 
-    new_records = [_reevaluate_record(r) for r in records]
+    new_records = [_reevaluate_record(r, multi_turn_threshold) for r in records]
 
     old_halluc = sum(1 for r in records if r["label"] == 1)
     new_halluc = sum(1 for r in new_records if r["label"] == 1)
@@ -346,6 +364,10 @@ def main() -> None:
                    help="Directory dell'esperimento (contiene labeled_dataset.json[l])")
     p.add_argument("--dry_run", action="store_true",
                    help="Calcola il diff senza scrivere nulla su disco")
+    p.add_argument("--multi_turn_threshold", type=float, default=None,
+                   help="Soglia per la regola di aggregazione multi-turn. "
+                        "Es. 0.7 = label=1 se >=70%% dei turni falliscono. "
+                        "Default None = regola any-turn (backward compatible).")
     args = p.parse_args()
 
     exp_dir = Path(args.exp_dir).resolve()
@@ -353,7 +375,11 @@ def main() -> None:
         print(f"ERRORE: {exp_dir} non esiste", file=sys.stderr)
         sys.exit(1)
 
-    reevaluate_experiment(exp_dir, dry_run=args.dry_run)
+    reevaluate_experiment(
+        exp_dir,
+        dry_run=args.dry_run,
+        multi_turn_threshold=args.multi_turn_threshold,
+    )
 
 
 if __name__ == "__main__":
