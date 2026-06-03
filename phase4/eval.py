@@ -15,7 +15,7 @@ Output:
   - layer_XX.png                      ROC + PR + score dist per layer
   - summary.png                       AUROC + F1 per layer (compatibile col passato)
   - metrics_per_layer.png             AUROC/Accuracy/Precision/Recall/F1 per layer (5 subplot)
-  - best_layer_detail.png             ROC + PR + score dist + confusion matrix (2x2)
+  - best_layer_detail.png             Confusion matrix del best layer (count + %)
 
 Uso:
     python eval.py \
@@ -430,7 +430,7 @@ def plot_metrics_per_layer(all_results: list[dict], out_path: Path) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plot — dettaglio sul best layer (ROC, PR, score dist, confusion matrix)
+# Plot — confusion matrix del best layer
 # ─────────────────────────────────────────────────────────────────────────────
 
 def plot_best_layer_detail(
@@ -442,8 +442,8 @@ def plot_best_layer_detail(
     out_path:  Path,
 ) -> None:
     """
-    Dettaglio del best layer: ROC + PR + distribuzione score + confusion matrix
-    in una singola figura 2x2.
+    Confusion matrix del best layer, con count + percentuali, etichette
+    TN/FP/FN/TP e metriche derivate (TPR, TNR, PPV, NPV, Accuracy, F1).
     """
     try:
         import matplotlib
@@ -453,66 +453,14 @@ def plot_best_layer_detail(
         print("[plot] matplotlib non disponibile — salto")
         return
 
-    fig, axes = plt.subplots(2, 2, figsize=(13, 11))
-
-    # ── ROC ──────────────────────────────────────────────────────────────────
-    fpr, tpr, thresholds_roc = roc_curve(labels, probs)
-    ax = axes[0, 0]
-    ax.plot(fpr, tpr, color="steelblue", linewidth=2,
-            label=f"AUROC = {metrics['auroc']:.3f} "
-                  f"[{metrics['auroc_ci_95'][0]:.3f}–{metrics['auroc_ci_95'][1]:.3f}]")
-    ax.plot([0, 1], [0, 1], "k--", linewidth=1, alpha=0.5, label="random")
-    # punto Youden
-    idx_youden = int(np.argmax(tpr - fpr))
-    ax.scatter([fpr[idx_youden]], [tpr[idx_youden]], color="red", s=80, zorder=5,
-               label=f"Youden θ={threshold:.3f}")
-    ax.set_xlabel("False Positive Rate")
-    ax.set_ylabel("True Positive Rate")
-    ax.set_title(f"ROC Curve — Layer {layer}")
-    ax.legend(fontsize=9, loc="lower right")
-    ax.grid(True, alpha=0.3)
-
-    # ── PR ───────────────────────────────────────────────────────────────────
-    prec_curve, rec_curve, thresholds_pr = precision_recall_curve(labels, probs)
-    ax = axes[0, 1]
-    ax.plot(rec_curve, prec_curve, color="darkorange", linewidth=2,
-            label=f"AUPRC = {metrics['auprc']:.3f} "
-                  f"[{metrics['auprc_ci_95'][0]:.3f}–{metrics['auprc_ci_95'][1]:.3f}]")
-    pos_rate = metrics["n_pos"] / metrics["n_samples"]
-    ax.axhline(pos_rate, color="gray", linestyle="--", linewidth=1,
-               label=f"random baseline ({pos_rate:.2f})")
-    # punto al threshold corrente
-    ax.scatter([metrics["recall"]], [metrics["precision"]], color="red", s=80,
-               zorder=5, label=f"Youden  P={metrics['precision']:.2f} "
-                               f"R={metrics['recall']:.2f}")
-    ax.set_xlabel("Recall")
-    ax.set_ylabel("Precision")
-    ax.set_title(f"Precision-Recall Curve — Layer {layer}")
-    ax.legend(fontsize=9, loc="lower left")
-    ax.grid(True, alpha=0.3)
-
-    # ── Score distribution ───────────────────────────────────────────────────
-    ax = axes[1, 0]
-    ax.hist(probs[labels == 0], bins=30, alpha=0.6, color="steelblue",
-            density=True, label=f"Negativi (n={metrics['n_neg']})")
-    ax.hist(probs[labels == 1], bins=30, alpha=0.6, color="tomato",
-            density=True, label=f"Positivi (n={metrics['n_pos']})")
-    ax.axvline(threshold, color="black", linestyle="--", linewidth=1.5,
-               label=f"soglia = {threshold:.3f}")
-    ax.set_xlabel("Score (probabilità allucinazione)")
-    ax.set_ylabel("Densità")
-    ax.set_title(f"Distribuzione Score — Layer {layer}")
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-
-    # ── Confusion matrix ─────────────────────────────────────────────────────
-    ax = axes[1, 1]
     tp, fp, tn, fn = metrics["tp"], metrics["fp"], metrics["tn"], metrics["fn"]
-    cm = np.array([[tn, fp], [fn, tp]])
-    total = cm.sum()
+    cm     = np.array([[tn, fp], [fn, tp]])
+    total  = cm.sum()
     cm_pct = cm / total * 100 if total else cm
 
-    im = ax.imshow(cm, cmap="Blues", aspect="equal")
+    fig, ax = plt.subplots(figsize=(8, 7))
+
+    ax.imshow(cm, cmap="Blues", aspect="equal")
     ax.set_xticks([0, 1])
     ax.set_yticks([0, 1])
     ax.set_xticklabels(["Pred. negativo (0)", "Pred. positivo (1)"])
@@ -523,17 +471,17 @@ def plot_best_layer_detail(
 
     # annota count + percentuale + etichetta TN/FP/FN/TP in ogni cella
     cell_labels = [["TN", "FP"], ["FN", "TP"]]
-    threshold_color = cm.max() * 0.6
+    text_threshold = cm.max() * 0.6
     for i in range(2):
         for j in range(2):
-            value     = cm[i, j]
-            pct       = cm_pct[i, j]
-            label_tag = cell_labels[i][j]
-            text_color = "white" if value > threshold_color else "black"
+            value      = cm[i, j]
+            pct        = cm_pct[i, j]
+            label_tag  = cell_labels[i][j]
+            text_color = "white" if value > text_threshold else "black"
             ax.text(j, i,
                     f"{label_tag}\n{value}\n({pct:.1f}%)",
                     ha="center", va="center",
-                    color=text_color, fontsize=12, fontweight="bold")
+                    color=text_color, fontsize=14, fontweight="bold")
 
     # metriche derivate sotto la confusion matrix
     derived = (
@@ -544,15 +492,11 @@ def plot_best_layer_detail(
         f"Accuracy = {metrics['accuracy']:.3f}    "
         f"F1 = {metrics['f1']:.3f}"
     )
-    ax.text(0.5, -0.30, derived, transform=ax.transAxes,
-            ha="center", va="top", fontsize=10, family="monospace",
+    ax.text(0.5, -0.22, derived, transform=ax.transAxes,
+            ha="center", va="top", fontsize=11, family="monospace",
             bbox=dict(boxstyle="round,pad=0.5", facecolor="#f5f5f5", edgecolor="gray"))
 
-    fig.suptitle(
-        f"Phase 4 — Dettaglio Best Layer {layer}",
-        fontsize=13,
-    )
-    fig.tight_layout(rect=[0, 0, 1, 0.97])
+    fig.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
     print(f"[plot] best_layer_detail salvato → {out_path}")
