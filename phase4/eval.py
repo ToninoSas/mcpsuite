@@ -412,7 +412,7 @@ def plot_metrics_per_layer(all_results: list[dict], out_path: Path) -> None:
         ["Precision", f"{best['precision']:.4f}"],
         ["Recall",    f"{best['recall']:.4f}"],
         ["F1",        f"{best['f1']:.4f}"],
-        ["Threshold", f"{best['threshold']:.4f}  (Youden's J)"],
+        #["Threshold", f"{best['threshold']:.4f}  (Youden's J)"],
         ["N test",    f"{best['n_samples']} ({best['n_pos']} pos, {best['n_neg']} neg)"],
     ]
     table = ax.table(cellText=table_rows, colWidths=[0.35, 0.55],
