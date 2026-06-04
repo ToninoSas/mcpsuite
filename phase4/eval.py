@@ -188,7 +188,13 @@ def compute_metrics(
     f1_lo,   f1_hi   = bootstrap_ci(labels, probs, f1_fn,   threshold=threshold, n=bootstrap_n)
     acc_lo,  acc_hi  = bootstrap_ci(labels, probs, acc_fn,  threshold=threshold, n=bootstrap_n)
 
-    majority_baseline = float((labels == 0).mean())
+    # Majority baseline = accuracy del predittore costante che predice sempre
+    # la classe più frequente. Va calcolata come max tra le due frazioni di
+    # classe: su test set a maggioranza positiva (es. multi-turn, ~75% halluc)
+    # i negativi NON sono la maggioranza, quindi (labels==0).mean() darebbe la
+    # baseline della classe minoritaria.
+    neg_frac = float((labels == 0).mean())
+    majority_baseline = max(neg_frac, 1.0 - neg_frac)
 
     return {
         "n_samples":        int(len(labels)),

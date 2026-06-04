@@ -328,10 +328,13 @@ def plot_layer_metrics(layer_metrics: list[dict], out_path: Path) -> None:
     acc_stds  = [m["cv_accuracy_std"]    for m in layer_metrics]
     best_idx  = int(np.argmax(cv_means))
 
-    # baseline accuracy = maggioranza (% negativi)
+    # baseline accuracy = classe maggioritaria (max tra % negativi e % positivi).
+    # Su dataset a maggioranza positiva (es. multi-turn) i negativi NON sono la
+    # maggioranza, quindi non basta (n_tot - n_pos)/n_tot.
     n_pos = layer_metrics[0]["pos_cv_pool"]
     n_tot = layer_metrics[0]["n_cv_pool"]
-    majority_acc = (n_tot - n_pos) / n_tot
+    neg_frac = (n_tot - n_pos) / n_tot
+    majority_acc = max(neg_frac, 1.0 - neg_frac)
 
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(13, 9), sharex=True)
 

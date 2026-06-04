@@ -53,10 +53,13 @@ def plot_comparison(
     best_b = int(np.argmax(auroc_b))
 
     # baseline accuracy = classe maggioritaria per ogni esperimento
+    # (max tra % negativi e % positivi: su dataset a maggioranza positiva i
+    # negativi non sono la classe più frequente)
     def majority_baseline(metrics):
         n_pos = metrics[0]["pos_cv_pool"]
         n_tot = metrics[0]["n_cv_pool"]
-        return (n_tot - n_pos) / n_tot
+        neg_frac = (n_tot - n_pos) / n_tot
+        return max(neg_frac, 1.0 - neg_frac)
 
     maj_a = majority_baseline(metrics_a)
     maj_b = majority_baseline(metrics_b)
