@@ -161,6 +161,97 @@ def plot_train_test_matrix(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Bar chart — valutazioni a test fisso, varia il training set (es. colonna merged)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_fixed_test_bars(
+    cells:       dict[tuple[str, str], dict],
+    group_order: list[str],
+    bar_order:   list[str],
+    out_path:    str | Path,
+    title:       str = "Valutazioni su test merged",
+    test_label:  str = "merged",
+    ymin:        float = 0.5,
+    ymax:        float = 1.0,
+) -> None:
+    """
+    Bar chart raggruppato per confrontare valutazioni con lo STESSO test set
+    (es. la colonna merged) al variare del training set, per più modelli.
+
+    cells:       {(group, train): {"auroc", "ci", "layer"}}
+                 group = etichetta del gruppo (es. modello "Qwen"/"Llama")
+                 train = distribuzione di training (es. "single"/"multi"/"merged")
+    group_order: gruppi sull'asse x (es. ["Qwen", "Llama"])
+    bar_order:   barre dentro ogni gruppo (es. ["single", "multi", "merged"])
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    n_groups = len(group_order)
+    n_bars   = len(bar_order)
+    width    = 0.8 / n_bars
+    x        = np.arange(n_groups)
+
+    # palette per training set
+    palette = ["#4c72b0", "#dd8452", "#55a868", "#c44e52", "#8172b3"]
+    colors  = {b: palette[i % len(palette)] for i, b in enumerate(bar_order)}
+
+    fig, ax = plt.subplots(figsize=(2.6 * n_groups + 3.0, 6))
+
+    for j, bar in enumerate(bar_order):
+        vals, los, his, layers = [], [], [], []
+        for g in group_order:
+            cell = cells.get((g, bar))
+            if cell is None:
+                vals.append(np.nan); los.append(0); his.append(0); layers.append(None)
+            else:
+                v  = cell["auroc"]
+                ci = cell.get("ci", [v, v])
+                vals.append(v)
+                los.append(v - ci[0])
+                his.append(ci[1] - v)
+                layers.append(cell.get("layer"))
+        offset = (j - (n_bars - 1) / 2) * width
+        bars = ax.bar(x + offset, vals, width, yerr=[los, his], capsize=4,
+                      color=colors[bar], label=f"train: {bar}",
+                      edgecolor="black", linewidth=0.6, error_kw={"elinewidth": 1.2})
+        # annota valore + best layer sopra l'estremo superiore del CI
+        for xi, v, hi_off, lay in zip(x + offset, vals, his, layers):
+            if np.isnan(v):
+                continue
+            ax.text(xi, v + hi_off + 0.012, f"{v:.2f}\nL{lay}",
+                    ha="center", va="bottom", fontsize=8, fontweight="bold")
+
+    ax.axhline(0.5, color="gray", linestyle=":", linewidth=1, label="random (0.5)")
+    ax.set_xticks(x)
+    ax.set_xticklabels(group_order, fontsize=12)
+    ax.set_ylabel("AUROC (best layer)", fontsize=11)
+    ax.set_ylim(ymin, ymax)
+    ax.set_title(f"{title}  —  test set: {test_label}", fontsize=13)
+    ax.legend(fontsize=9, loc="lower right")
+    ax.grid(True, axis="y", alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[plot] bar chart salvato → {out_path}")
+
+    # riepilogo testuale
+    print(f"\n{'gruppo':>10}  {'train':>8}  {'AUROC':>7}  {'95% CI':>15}  {'layer':>6}")
+    print("─" * 56)
+    for g in group_order:
+        for b in bar_order:
+            cell = cells.get((g, b))
+            if cell is None:
+                continue
+            ci = cell.get("ci", [0, 0])
+            print(f"  {g:>8}  {b:>8}  {cell['auroc']:>6.3f}  "
+                  f"[{ci[0]:.3f}–{ci[1]:.3f}]  {cell['layer']:>6}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # CLI
 # ─────────────────────────────────────────────────────────────────────────────
 
