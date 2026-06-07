@@ -12,8 +12,6 @@ calcola le predizioni sul test set e riporta:
 
 Output:
   - results.json                      tutti i layer, metriche + per-categoria
-  - layer_XX.json                     singolo layer
-  - layer_XX.png                      ROC + PR + score dist per layer
   - summary.png                       AUROC + F1 per layer (compatibile col passato)
   - metrics_per_layer.png             AUROC/Accuracy/Precision/Recall/F1 per layer (5 subplot)
   - best_layer_detail.png             Confusion matrix del best layer (count + %)
@@ -45,7 +43,6 @@ import torch.nn as nn
 from sklearn.metrics import (
     average_precision_score,
     f1_score,
-    precision_recall_curve,
     precision_score,
     recall_score,
     roc_auc_score,
@@ -254,81 +251,6 @@ def per_category_metrics(
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Plot
-# ─────────────────────────────────────────────────────────────────────────────
-
-def plot_eval(
-    labels: np.ndarray,
-    probs: np.ndarray,
-    threshold: float,
-    layer: int,
-    metrics: dict,
-    out_path: Path,
-) -> None:
-    try:
-        import matplotlib
-        matplotlib.use("Agg")
-        import matplotlib.pyplot as plt
-    except ImportError:
-        print("[plot] matplotlib non disponibile — salto")
-        return
-
-    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
-
-    # ── ROC curve ────────────────────────────────────────────────────────────
-    fpr, tpr, _ = roc_curve(labels, probs)
-    ax = axes[0]
-    ax.plot(fpr, tpr, color="steelblue", linewidth=2,
-            label=f"AUROC = {metrics['auroc']:.3f} "
-                  f"(95% CI {metrics['auroc_ci_95'][0]:.3f}–{metrics['auroc_ci_95'][1]:.3f})")
-    ax.plot([0, 1], [0, 1], "k--", linewidth=1, label="random")
-    ax.set_xlabel("False Positive Rate")
-    ax.set_ylabel("True Positive Rate")
-    ax.set_title(f"ROC Curve — Layer {layer}")
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-
-    # ── Precision-Recall curve ───────────────────────────────────────────────
-    prec, rec, _ = precision_recall_curve(labels, probs)
-    ax = axes[1]
-    ax.plot(rec, prec, color="darkorange", linewidth=2,
-            label=f"AUPRC = {metrics['auprc']:.3f} "
-                  f"(95% CI {metrics['auprc_ci_95'][0]:.3f}–{metrics['auprc_ci_95'][1]:.3f})")
-    ax.axhline(metrics["n_pos"] / metrics["n_samples"], color="gray",
-               linestyle="--", linewidth=1, label="random baseline")
-    ax.set_xlabel("Recall")
-    ax.set_ylabel("Precision")
-    ax.set_title(f"Precision-Recall Curve — Layer {layer}")
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-
-    # ── Score distribution ───────────────────────────────────────────────────
-    ax = axes[2]
-    ax.hist(probs[labels == 0], bins=30, alpha=0.6, color="steelblue",
-            density=True, label=f"Negativi (n={metrics['n_neg']})")
-    ax.hist(probs[labels == 1], bins=30, alpha=0.6, color="tomato",
-            density=True, label=f"Positivi (n={metrics['n_pos']})")
-    ax.axvline(threshold, color="black", linestyle="--", linewidth=1.5,
-               label=f"soglia = {threshold:.3f}")
-    ax.set_xlabel("Score (probabilità allucinazione)")
-    ax.set_ylabel("Densità")
-    ax.set_title(f"Distribuzione Score — Layer {layer}")
-    ax.legend(fontsize=9)
-    ax.grid(True, alpha=0.3)
-
-    fig.suptitle(
-        f"Phase 4 — Layer {layer}  |  "
-        f"Recall={metrics['recall']:.3f}  Precision={metrics['precision']:.3f}  "
-        f"F1={metrics['f1']:.3f}  (soglia={threshold:.3f})",
-        fontsize=11,
-    )
-    fig.tight_layout()
-    fig.savefig(out_path, dpi=150)
-    plt.close(fig)
-    print(f"[plot] salvato → {out_path}")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Valutazione singolo layer
 # ─────────────────────────────────────────────────────────────────────────────
 
@@ -368,13 +290,10 @@ def eval_layer(
     }
 
     out_dir.mkdir(parents=True, exist_ok=True)
-    with open(out_dir / f"layer_{layer_idx:02d}.json", "w") as f:
-        json.dump(result, f, indent=2)
 
-    plot_eval(
-        labels, probs, threshold, layer_idx, metrics,
-        out_dir / f"layer_{layer_idx:02d}.png",
-    )
+    # Le metriche per-layer confluiscono in results.json (aggregato) e nei plot
+    # riassuntivi (metrics_per_layer.png, best_layer_detail.png). Non scriviamo
+    # più i file per-layer (layer_XX.json / layer_XX.png): ridondanti e ingombranti.
 
     # Attacchiamo labels/probs/threshold al risultato per il plot di dettaglio
     # del best layer (non vengono salvati nel JSON per evitare di duplicare i dati)
