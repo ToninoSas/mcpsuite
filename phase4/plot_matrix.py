@@ -172,7 +172,7 @@ def plot_fixed_test_bars(
     title:       str = "Valutazioni su test merged",
     test_label:  str = "merged",
     ymin:        float = 0.5,
-    ymax:        float = 1.0,
+    ymax:        float | None = None,
 ) -> None:
     """
     Bar chart raggruppato per confrontare valutazioni con lo STESSO test set
@@ -197,6 +197,13 @@ def plot_fixed_test_bars(
     # palette per training set
     palette = ["#4c72b0", "#dd8452", "#55a868", "#c44e52", "#8172b3"]
     colors  = {b: palette[i % len(palette)] for i, b in enumerate(bar_order)}
+
+    # Limite superiore automatico: lascia spazio sopra l'estremo superiore del CI
+    # più alto, così l'etichetta "valore / Lxx" (2 righe) non sfora il bordo.
+    if ymax is None:
+        upper_cis = [c.get("ci", [c["auroc"], c["auroc"]])[1] for c in cells.values()]
+        max_top = max(upper_cis) if upper_cis else 1.0
+        ymax = min(max_top + 0.08, 1.10)   # margine per le 2 righe di testo
 
     fig, ax = plt.subplots(figsize=(2.6 * n_groups + 3.0, 6))
 
