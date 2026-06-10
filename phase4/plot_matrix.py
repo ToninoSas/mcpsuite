@@ -140,7 +140,10 @@ def plot_train_test_matrix(
     cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
     cbar.set_label(metric.upper(), fontsize=11)
 
-    ax.set_title(title, fontsize=13, pad=14)
+    # title=None o "" → nessun titolo (utile quando il nome del modello è dato
+    # dalla sub-caption LaTeX in una figura affiancata)
+    if title:
+        ax.set_title(title, fontsize=13, pad=14)
     fig.tight_layout()
     fig.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close(fig)
