@@ -61,6 +61,95 @@ def best_from_results(results_path: str | Path) -> dict:
     }
 
 
+def per_layer_curve(results_path: str | Path) -> tuple[list, list, list, list]:
+    """
+    Estrae da un results.json la curva AUROC-per-layer completa:
+    restituisce (layers, auroc, ci_lo, ci_hi), ordinati per layer.
+    """
+    data = json.loads(Path(results_path).read_text())
+    if isinstance(data, dict) and "layers" in data:
+        data = data["layers"]
+    data = sorted(data, key=lambda r: r["layer"])
+    layers = [r["layer"] for r in data]
+    auroc  = [r["metrics"]["auroc"] for r in data]
+    ci     = [r["metrics"].get("auroc_ci_95", [r["metrics"]["auroc"]] * 2) for r in data]
+    lo     = [c[0] for c in ci]
+    hi     = [c[1] for c in ci]
+    return layers, auroc, lo, hi
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Griglia AUROC-per-layer (2×2): mostra la gobba in-distribution vs il collasso
+# nel transfer
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_auroc_per_layer_grid(
+    cells_paths: dict[tuple[str, str], str],
+    row_order:   list[str],
+    col_order:   list[str],
+    out_path:    str | Path,
+    title:       str | None = None,
+) -> None:
+    """
+    Griglia di curve AUROC-per-layer, una per cella della matrice train×test.
+    Layout: righe = training set, colonne = test set (come la heatmap).
+    Le celle diagonali (in-distribution) sono colorate diversamente da quelle
+    di transfer, così si vede la gobba a mid-depth vs il collasso a layer shallow.
+
+    cells_paths: {(train, test): path/results.json}
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    n_rows, n_cols = len(row_order), len(col_order)
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(5.2 * n_cols, 3.6 * n_rows),
+                             sharex=True, sharey=True, squeeze=False)
+
+    for i, tr in enumerate(row_order):
+        for j, te in enumerate(col_order):
+            ax = axes[i][j]
+            path = cells_paths.get((tr, te))
+            if path is None or not Path(path).exists():
+                ax.set_visible(False)
+                continue
+
+            layers, auroc, lo, hi = per_layer_curve(path)
+            is_diag = (tr == te)
+            color = "steelblue" if is_diag else "tomato"
+
+            ax.plot(layers, auroc, "o-", color=color, markersize=3, linewidth=1.6)
+            ax.fill_between(layers, lo, hi, color=color, alpha=0.15)
+            ax.axhline(0.5, color="gray", linestyle=":", linewidth=1)
+
+            best = int(np.argmax(auroc))
+            ax.axvline(layers[best], color="black", linestyle="--",
+                       linewidth=1.0, alpha=0.6)
+            ax.text(0.97, 0.06,
+                    f"best layer {layers[best]}  (AUROC {auroc[best]:.2f})",
+                    transform=ax.transAxes, ha="right", va="bottom", fontsize=8,
+                    bbox=dict(boxstyle="round,pad=0.3", facecolor="white",
+                              edgecolor="lightgray", alpha=0.85))
+
+            tag = "in-distribution" if is_diag else "transfer"
+            ax.set_title(f"train: {tr}  $\\rightarrow$  test: {te}   ({tag})",
+                         fontsize=10, fontweight="bold" if is_diag else "normal")
+            ax.set_ylim(0.4, 1.0)
+            ax.grid(True, alpha=0.3)
+            if i == n_rows - 1:
+                ax.set_xlabel("Layer index")
+            if j == 0:
+                ax.set_ylabel("AUROC")
+
+    if title:
+        fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[plot] griglia AUROC-per-layer salvata → {out_path}")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Heatmap
 # ─────────────────────────────────────────────────────────────────────────────
