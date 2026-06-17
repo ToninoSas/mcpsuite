@@ -213,11 +213,11 @@ def plot_train_test_matrix(
             val = cell[metric]
             ci  = cell.get("ci", [val, val])
             lay = cell.get("layer")
+            delta = (ci[1] - ci[0]) / 2   # semi-ampiezza del CI → formato ±
             # testo scuro/chiaro a seconda del valore (verde chiaro → testo scuro)
             text_color = "black"
             txt = (
-                f"{val:.3f}\n"
-                f"[{ci[0]:.2f}–{ci[1]:.2f}]\n"
+                f"{val:.2f} ± {delta:.2f}\n"
                 f"layer {lay}"
             )
             tag = "in-dist" if tr == te else "transfer"
@@ -239,17 +239,18 @@ def plot_train_test_matrix(
     print(f"[plot] matrice salvata → {out_path}")
 
     # riepilogo testuale
-    print(f"\n{'train→test':>16}  {'AUROC':>7}  {'95% CI':>15}  {'layer':>6}  tipo")
-    print("─" * 62)
+    print(f"\n{'train→test':>16}  {'AUROC (±CI)':>14}  {'layer':>6}  tipo")
+    print("─" * 52)
     for tr in row_order:
         for te in col_order:
             cell = cells.get((tr, te))
             if cell is None:
                 continue
-            ci = cell.get("ci", [0, 0])
+            ci = cell.get("ci", [cell["auroc"], cell["auroc"]])
+            delta = (ci[1] - ci[0]) / 2
             tag = "in-dist" if tr == te else "transfer"
-            print(f"  {tr+'→'+te:>14}  {cell['auroc']:>6.3f}  "
-                  f"[{ci[0]:.3f}–{ci[1]:.3f}]  {cell['layer']:>6}  {tag}")
+            print(f"  {tr+'→'+te:>14}  {cell['auroc']:.2f} ± {delta:.2f}  "
+                  f"{cell['layer']:>6}  {tag}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
