@@ -390,13 +390,15 @@ def plot_metrics_per_layer(all_results: list[dict], out_path: Path) -> None:
     best = all_results[best_idx]["metrics"]
 
     def fmt_ci(value: float, ci: list[float]) -> str:
-        return f"{value:.4f}  [{ci[0]:.3f}–{ci[1]:.3f}]"
+        # valore a 2 cifre ± semi-ampiezza del CI a 2 cifre
+        delta = (ci[1] - ci[0]) / 2
+        return f"{value:.2f} ± {delta:.2f}"
 
     table_rows = [
         ["Layer",     f"{best_layer}"],
         ["AUROC",     fmt_ci(best['auroc'],     best['auroc_ci_95'])],
         ["Accuracy",  fmt_ci(best['accuracy'],  best['accuracy_ci_95'])
-                     + f"  (baseline {majority_baseline:.3f})"],
+                     + f"  (baseline {majority_baseline:.2f})"],
         ["Precision", fmt_ci(best['precision'], best['precision_ci_95'])],
         ["Recall",    fmt_ci(best['recall'],    best['recall_ci_95'])],
         ["F1",        fmt_ci(best['f1'],        best['f1_ci_95'])],
@@ -407,7 +409,7 @@ def plot_metrics_per_layer(all_results: list[dict], out_path: Path) -> None:
     table.auto_set_font_size(False)
     table.set_fontsize(9)
     table.scale(1, 1.6)
-    ax.set_title(f"Best layer — riepilogo (valore  [95% CI])", fontsize=11)
+    ax.set_title(f"Best layer — riepilogo (valore ± semi-CI 95%)", fontsize=11)
 
     fig.suptitle("Phase 4 — Metriche per layer sul test set", fontsize=13)
     fig.tight_layout()
