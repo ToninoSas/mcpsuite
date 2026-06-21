@@ -79,6 +79,61 @@ def per_layer_curve(results_path: str | Path) -> tuple[list, list, list, list]:
 
 
 # ─────────────────────────────────────────────────────────────────────────────
+# Curva AUROC-per-layer (una o più valutazioni sovrapposte)
+# ─────────────────────────────────────────────────────────────────────────────
+
+def plot_auroc_curves(
+    curves:   dict[str, str],
+    out_path: str | Path,
+    title:    str | None = None,
+    ymin:     float = 0.4,
+    ymax:     float = 1.0,
+) -> None:
+    """
+    Sovrappone le curve AUROC-per-layer di una o più valutazioni.
+    Utile per confrontare la stessa valutazione tra modelli (es. merged→merged
+    di Qwen vs Llama) o per mostrare una singola curva.
+
+    curves: {etichetta: path/results.json}  (ordine preservato in legenda)
+    """
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    palette = ["#4c72b0", "#dd8452", "#55a868", "#c44e52", "#8172b3"]
+
+    fig, ax = plt.subplots(figsize=(13, 6))
+
+    for k, (label, path) in enumerate(curves.items()):
+        if not Path(path).exists():
+            print(f"⚠  {path} non trovato — skip")
+            continue
+        layers, auroc, lo, hi = per_layer_curve(path)
+        color = palette[k % len(palette)]
+        best = int(np.argmax(auroc))
+
+        ax.plot(layers, auroc, "o-", color=color, linewidth=2, markersize=4,
+                label=f"{label}  (best layer {layers[best]}: {auroc[best]:.2f})")
+        ax.fill_between(layers, lo, hi, color=color, alpha=0.13)
+        ax.axvline(layers[best], color=color, linestyle="--", linewidth=1.0, alpha=0.5)
+
+    ax.axhline(0.5, color="gray", linestyle=":", linewidth=1, label="random baseline (0.5)")
+    ax.set_xlabel("Layer index", fontsize=11)
+    ax.set_ylabel("AUROC", fontsize=11)
+    ax.set_ylim(ymin, ymax)
+    ax.grid(True, alpha=0.3)
+    ax.legend(fontsize=9, loc="lower right")
+    if title:
+        ax.set_title(title, fontsize=13)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[plot] curve AUROC-per-layer salvate → {out_path}")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
 # Griglia AUROC-per-layer (2×2): mostra la gobba in-distribution vs il collasso
 # nel transfer
 # ─────────────────────────────────────────────────────────────────────────────
