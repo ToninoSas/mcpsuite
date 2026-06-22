@@ -77,22 +77,19 @@ sovrapposte. Test suite: 28 test in `test_evaluator.py` (di cui 3 per il
 formato `<function_name>{json}</function_name>` di Llama) + 10 test in
 `test_sampler.py`.
 
-**Dataset raccolto**:
+**Dataset raccolto** (hallucination rate finali, post-fix parser +
+`--use_native_tools` + strategia multi-turn B2 soglia 0.7):
 
-| Dataset | Modello | Campioni | Halluc. rate | Note |
+| Regime | N | Categorie | Qwen | Llama |
 |---|---|---|---|---|
-| `outputs/single_turn/` | Qwen | 1000 | 8.3% | simple, multiple, parallel, parallel_multiple |
-| `outputs/single_turn2/` | Qwen | 494 | ~18% | live_multiple, live_parallel, live_parallel_multiple |
-| `outputs/single_turn_merged/` | Qwen | 1494 | 11.7% | merge dei due sopra |
-| `outputs/multi_turn/` | Qwen | 600 | ~99% | multi_turn_base, miss_func, miss_param, composite |
-| `outputs/llama/llama/standard/` | Llama | 1000 | 50.0% † | standard single-turn |
-| `outputs/llama/llama/live/` | Llama | 494 | 62.5% † | live tasks |
-| `outputs/llama/llama/single_turn_merged/` | Llama | 1494 | 54.2% † | merge dei due |
-| `outputs/llama/llama/multi-turn/` | Llama | 600 | 99.8% | multi-turn |
-| `outputs/llama/llama/merged_all/` | Llama | 2094 | 67.2% † | merge single + multi |
+| single-turn | 1494 | simple, multiple, parallel, parallel_multiple + live_* | 11.7% | 28.6% |
+| multi-turn (B2 0.7) | 600 | multi_turn_base, miss_func, miss_param | 84.7% | 76.5% |
+| merged | 2094 | unione single + multi | 32.6% | 42.4% |
 
-† Valore pre-fix `--use_native_tools`: include label spurie da parser fail.
-Re-run con template nativo previsto per validare i numeri reali.
+I valori Llama pre-fix (single ~54%, merged ~67%, multi ~99.8%) erano inflazionati
+dal mismatch di formato (parser fail → falsi `NO_CALL_MADE`/`WRONG_CALL_COUNT`);
+risolti con `--use_native_tools` + fix del parser, e ri-etichettati con
+`reevaluate.py` senza rifare l'inferenza.
 
 **Key constraints**:
 - `--max_seq_len 3072` required on Kaggle T4 to prevent CUDA context corruption
@@ -150,19 +147,17 @@ l'architettura include `Sigmoid()` finale, impedendo l'uso di
 `BCEWithLogitsLoss` con `pos_weight` nativo. I pesi vengono applicati
 manualmente per-sample prima della media.
 
-**Esperimenti condotti (Qwen)**:
+**Esperimenti condotti**: per ciascun modello (Qwen, Llama) si addestrano tre
+classificatori — su single-turn, su multi-turn, su merged — e si valutano nella
+matrice cross-distribution 2×2 + colonna merged (risultati finali in Phase 4).
 
-| Esperimento | Training set | CV Best layer | CV AUROC |
-|---|---|---|---|
-| Single-turn only | 1494 single-turn (con live) | 13 | 0.7845 |
-| Mixed | 1494 single + 600 multi | 15 | 0.9505 |
+I valori in-distribution finali (best layer per AUROC) sono: single-turn 0.82
+(Qwen) / 0.86 (Llama), multi-turn 0.93 (Qwen) / 0.77 (Llama).
 
-**Esperimenti Llama**: in corso di re-validazione dopo il fix `--use_native_tools`.
-
-**Confound identificato**: il mixed experiment ha AUROC artificialmente alto (~0.95)
-perché il classificatore impara la distinzione strutturale single-turn (8% halluc) vs
-multi-turn (99% halluc), non il segnale genuino di allucinazione. Il profilo AUROC
-piatto su tutti i 32 layer conferma il confound.
+**Confound del merged**: addestrare/valutare sul merged dà AUROC inflazionato
+perché il classificatore può imparare la distinzione strutturale single-turn vs
+multi-turn (distribuzioni di classe opposte) anziché il segnale di allucinazione.
+La misura genuina viene dalla valutazione per-regime (matrice 2×2).
 
 **Files**:
 ```
@@ -184,47 +179,47 @@ con threshold optimization e confidence intervals.
 
 **Metodologia**:
 - Threshold ottimale: Youden's J = max(TPR − FPR), invece di 0.5 fisso
-- 95% CI: bootstrap con 1000 ricampionamenti
-- Metriche: AUROC, AUPRC, Recall, Precision, F1, Accuracy
+- 95% CI: bootstrap (1000 ricampionamenti) per **tutte** le metriche, non solo AUROC
+- Metriche: AUROC, AUPRC, Recall, Precision, F1, Accuracy (con majority baseline)
 - Breakdown per categoria (da meta.jsonl)
-- Plot: ROC curve, Precision-Recall curve, distribuzione score, summary per layer
+- Disegno **cross-distribution**: matrice 2×2 train×test (single/multi) + colonna merged
 
-**Risultati (Qwen)**:
+**Risultati finali — matrice 2×2 (AUROC del best layer)**:
 
-| Scenario | Classificatore | Test set | Best layer | AUROC | F1 | Recall | Prec |
-|---|---|---|---|---|---|---|---|
-| A | Single-turn | Single-turn | 30* | 0.831 | 0.463 | 0.846 | 0.319 |
-| B | Mixed | Mixed | 23 | 0.961† | 0.907 | 0.845 | 0.980 |
-| C | Mixed | Single-turn | 23 | 0.827 | 0.500 | 0.731 | 0.380 |
+| Train → Test | Tipo | Qwen (layer) | Llama (layer) |
+|---|---|---|---|
+| single → single | in-dist | 0.82 (19) | 0.86 (15) |
+| multi → multi | in-dist | 0.93 (13) | 0.77 (20) |
+| single → multi | transfer | 0.61 (10) | 0.61 (0) |
+| multi → single | transfer | 0.72 (13) | 0.67 (2) |
 
-\* Layer 30 sul test, layer 13 in CV — CI si sovrappongono, differenza dentro il rumore.
-† Inflazionato dal confound strutturale.
+**Colonna merged (test = merged)**: AUROC alto per entrambi (Qwen 0.92–0.94,
+Llama 0.69–0.87) ma parzialmente inflazionato dal confound strutturale (vedi sotto).
 
-**Finding principale**: Scenari A e C convergono a AUROC ~0.83 con best layer 23,
-dimostrando che il segnale è genuino e stabile indipendentemente dal training set.
-Layer 23 è una proprietà del modello, non del dataset.
+**Finding principale (cross-model)**: il segnale di allucinazione è **specifico
+della distribuzione**, non universale. È forte in-distribution (0.82–0.93, a
+profondità intermedia layer 15–20) ma non generalizza tra regimi (transfer
+0.61–0.72); nel transfer il best layer collassa su layer superficiali (correlato
+strutturale, non semantico). Stesso pattern — diagonale forte, transfer debole,
+asimmetria multi→single > single→multi — su **entrambi i modelli**: proprietà
+generale, non peculiarità di un singolo modello.
 
-**Interpretazione del tradeoff** (layer 23, threshold Youden ~0.12):
-```
-Su 100 tool call:
-  ~12 allucinazioni reali → ~9 bloccate (recall 0.73–0.85)
-  ~88 corrette            → ~20 bloccate erroneamente (falsi positivi)
-```
-In produzione la soglia va calibrata sul costo relativo di falso positivo vs falso negativo.
+**Confound del test merged**: il test merged mescola due regimi a distribuzione
+di classe opposta, quindi un AUROC alto può riflettere la distinzione del regime
+anziché l'allucinazione. L'effetto scala col divario di hallucination rate tra
+regimi: forte in Qwen (11.7% vs 84.7%), debole in Llama (28.6% vs 76.5%). La
+misura non contaminata è la matrice 2×2 per-regime.
 
-**Limitazione multi-turn**: il test set multi-turn ha quasi solo positivi (~99% halluc),
-rendendo AUROC indefinito (no negativi). La valutazione standalone del multi-turn
-non è praticabile con le metriche standard — usare il merged test set.
-
-**Risultati (Llama)**: classificatori addestrati e valutati sui dati pre-fix
-`--use_native_tools`. I valori sono stati invalidati dall'identificazione del
-mismatch di formato e sono in fase di re-esecuzione.
+**Implicazione applicativa**: un guardrail efficace dev'essere **specializzato
+per regime**, non universale.
 
 **Files**:
 ```
 phase4/
-  eval.py   ← carica classifier + test set, calcola metriche, plot ROC/PR/score dist
-             ← gestisce edge cases: test set con sola classe, bootstrap su lista vuota
+  eval.py        ← metriche + 95% CI (tutte), Youden, majority baseline,
+                   breakdown per categoria; produce results.json + summary.png +
+                   metrics_per_layer.png + best_layer_detail.png (confusion matrix)
+  plot_matrix.py ← heatmap 2×2, bar chart merged, griglia/curve AUROC-per-layer
 ```
 
 ---
@@ -242,10 +237,14 @@ phase4/
 | CV strategy | 5-fold StratifiedKFold on 85% pool | Stable estimate; preserves class proportions |
 | pos_weight | `n_neg/n_pos` manuale in `BCELoss(reduction="none")` | Handles imbalance; Sigmoid() finale impedisce BCEWithLogitsLoss |
 | Per-layer seed | `set_seed(seed + layer_idx)` | Riproducibilità indipendente dall'ordine di training dei layer |
-| Threshold | Youden's J (not 0.5) | With 12% positives, threshold 0.5 gives recall≈0 |
-| Multi-turn training | Included with caution | Aumenta positivi ma introduce confound — valutare su single-turn |
+| Threshold | Youden's J (not 0.5) | Con classi sbilanciate, threshold 0.5 dà recall≈0 |
+| Majority baseline | `max(frac_neg, frac_pos)` | Sui test a maggioranza positiva (multi-turn) `frac_neg` darebbe la baseline sbagliata |
+| CI bootstrap | Su tutte le metriche, non solo AUROC | Classi minoritarie piccole → CI larghi, da riportare sempre |
+| Multi-turn label | Aggregazione B2 (frac_failed ≥ 0.7) | La regola any-turn satura col n. di turni e gonfia i positivi |
+| Valutazione | Cross-distribution (matrice 2×2) | Misura il segnale per-regime senza il confound del merged |
 | Live categories | Incluse (solo num_gpus=1) | Aumentano positivi e eterogeneità; prompt lunghi causano OOM su dual-GPU |
-| Multi-turn evaluation | Solo su merged test set | Test set multi-turn solo ha ~0 negativi → AUROC indefinito |
 | Attention impl | `sdpa` (PyTorch SDPA) | Reduces attention memory O(n²)→O(n); no extra packages |
 | Dual-GPU loading | Sequential | bitsandbytes not thread-safe; parallel loading causes CUDA races |
 | Multi-model template | Per-model via `MODEL_CONFIGS` + `--use_native_tools` | Qwen segue system prompt; Llama richiede `apply_chat_template(tools=)` nativo per non improvvisare il formato |
+| Llama parser | step 1b `<function_name>` + step 2b parallel `{...};{...}` | Recupera falsi positivi dal formato nativo di Llama |
+| Re-etichettatura | `reevaluate.py` | Applica fix dell'evaluator/strategia B2 ai dataset esistenti senza rifare l'inferenza |

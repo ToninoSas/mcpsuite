@@ -1,6 +1,6 @@
 # Phase 1 — Implementation Notes
 
-## Status: ✅ Complete (28/28 evaluator tests + 10/10 sampler tests passing)
+## Status: ✅ Complete (32/32 evaluator tests + 10/10 sampler tests passing)
 
 The pipeline supports **two models** through the same code path:
 
@@ -55,6 +55,11 @@ The heart of Phase 1. Fully deterministic, no external API calls.
    - JSON con `name` solo, tutti gli altri campi diventano arguments
    - JSON senza `name`, il tag stesso diventa il nome funzione
 2. JSON fenced block (` ```json ``` `)
+2b. **Llama parallel format** `{...}; {...}; ...` — oggetti JSON top-level
+    separati da `;` (formato nativo di Llama per le parallel call). Estrazione
+    string-aware di tutti i top-level `{...}` (`_extract_top_level_braces`).
+    Senza questo, lo step 3 estraeva solo il primo oggetto → `WRONG_CALL_COUNT`
+    sistematico sulle categorie parallel.
 3. JSON inline (finds first `[` or `{` and extracts balanced structure)
 4. Python call-string with balanced-parenthesis extractor
 
@@ -92,6 +97,22 @@ label=1  →  hallucination_type ∈ {
 **Note**: `INFERENCE_ERROR` samples must be **filtered out before classifier
 training** — they carry no meaningful residual stream signal. Already handled
 by `ActivationDataset(filter_inference_errors=True)`.
+
+**Multi-turn — aggregazione del label.** `evaluate_multi_turn()` valuta ogni
+turno e aggrega in un label di sample. Il parametro `aggregation_threshold`
+controlla la regola: `None` = any-turn (label=1 se almeno un turno fallisce),
+`0.7` = strategia B2 (label=1 se `frac_failed ≥ 0.7`). Per i turni in cui il GT è
+vuoto (scenari miss_func/miss_param dove non si deve chiamare), un no-call
+corretto è `label=0`; una call non attesa è `WRONG_FUNCTION`.
+
+### `reevaluate.py`
+
+Ri-applica l'evaluator a un `labeled_dataset` esistente **senza rifare
+l'inferenza**: rigenera `labeled_dataset.jsonl`, `splits/`, `metrics.json` e
+`activations/{split}/y.npy`+`meta.jsonl` (X.npy resta invariato). Usato per
+propagare fix del parser o la strategia multi-turn (`--multi_turn_threshold`)
+ai dataset già prodotti. Esempio: il fix del formato parallel di Llama ha
+recuperato ~218 falsi positivi senza un nuovo run GPU.
 
 ### `runner.py`
 

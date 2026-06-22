@@ -18,23 +18,27 @@ nativo per Llama).
 | Phase 1 — Dataset & pipeline di inferenza (multi-modello) | ✅ Completa | `outputs/*/labeled_dataset.jsonl` |
 | Phase 2 — Cattura residual stream | ✅ Integrata nella Phase 1 | `outputs/*/activations/` |
 | Phase 3 — Addestramento classificatori per layer | ✅ Completa | `classifiers_*/metrics.json` |
-| Phase 4 — Valutazione sul test set | ✅ Completa | `eval_results*/results.json` |
-| Estensione multi-modello (Llama-3.1) | 🟡 Inferenza/eval in corso | `outputs/llama/...` |
+| Phase 4 — Valutazione cross-distribution | ✅ Completa | `eval_results*/results.json` + heatmap/bar/grid |
+| Estensione multi-modello (Qwen + Llama) | ✅ Completa | matrice 2×2 + colonna merged |
 
-### Risultati principali (Qwen3.5-9B)
+### Risultati principali — matrice 2×2 (AUROC del best layer)
 
-| Esperimento | Test set | Best layer | AUROC | F1 |
-|---|---|---|---|---|
-| Single-turn (1494 campioni) | Single-turn | 23 | **0.831** | 0.463 |
-| Mixed (single + multi-turn) | Mixed | 23 | 0.961* | 0.907 |
-| Mixed classifier | Single-turn | 23 | **0.827** | 0.500 |
+| Train → Test | Tipo | Qwen (layer) | Llama (layer) |
+|---|---|---|---|
+| single → single | in-distribution | **0.82** (19) | **0.86** (15) |
+| multi → multi | in-distribution | **0.93** (13) | **0.77** (20) |
+| single → multi | transfer | 0.61 (10) | 0.61 (0) |
+| multi → single | transfer | 0.72 (13) | 0.67 (2) |
 
-*AUROC 0.96 è inflazionato da un confound strutturale (single vs multi-turn). Il
-segnale genuino di allucinazione è **AUROC ~0.83**, stabile al layer 23.
+**Finding principale (cross-model)**: il segnale di allucinazione nel residual
+stream è **rilevabile ma specifico della distribuzione**. È forte in-distribution
+(AUROC 0.82–0.93, a profondità intermedia) ma non generalizza tra regimi (transfer
+0.61–0.72). Lo stesso pattern su entrambi i modelli → proprietà generale.
+Implicazione: un guardrail efficace dev'essere specializzato per regime.
 
-I risultati Llama-3.1 sono in fase di revalidazione dopo l'introduzione del
-flag `--use_native_tools`, necessario per evitare mismatch di formato tra il
-system prompt custom e il template di tool calling fine-tuned del modello.
+Le valutazioni su test **merged** danno AUROC alto (fino a 0.94) ma parzialmente
+inflazionato da un confound strutturale (il test mescola due regimi a
+distribuzione di classe opposta); la misura non contaminata è la matrice 2×2.
 
 ---
 
@@ -296,7 +300,7 @@ mcpsuite/
     ├── single_turn/           ← Qwen, 1000 campioni standard
     ├── single_turn2/          ← Qwen, 494 campioni live
     ├── single_turn_merged/    ← Qwen, merge dei due (1494, 11.7% halluc)
-    ├── multi_turn/            ← Qwen, 600 campioni multi-turn (~99% halluc)
+    ├── multi_turn/            ← Qwen, 600 campioni multi-turn (84.7% halluc, B2 0.7)
     └── llama/llama/           ← Llama, esperimenti multi-modello
         ├── standard/
         ├── live/

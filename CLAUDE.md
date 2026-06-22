@@ -95,33 +95,49 @@ layer si decidono di addestrare in una sessione.
 | Phase 1 — Test Suite, Dataset & Activation Capture | ✅ Completa | `outputs/*/labeled_dataset.jsonl`, `outputs/*/activations/` |
 | Phase 2 — Residual Stream Capture | ✅ Integrata nella Phase 1 | gestita da `pipeline.py --capture_activations` |
 | Phase 3 — Per-Layer Classifier Training | ✅ Completa | `classifiers_*/`, `metrics.json`, `metrics_per_layer.png` |
-| Phase 4 — Eval & Guardrail | ✅ Completa | `eval_results*/`, `results.json`, `summary.png` |
-| **Multi-modello (Llama-3.1-8B-Instruct)** | 🟡 Inferenza ed eval in corso | `outputs/llama/...` |
+| Phase 4 — Eval & Cross-distribution | ✅ Completa | `eval_results*/`, `results.json`, heatmap/bar/grid |
+| **Multi-modello (Qwen + Llama)** | ✅ Completo | matrice 2×2 + colonna merged, entrambi i modelli |
 
-### Risultati Qwen (consolidati)
+### Disegno sperimentale finale
 
-| Esperimento | Test set | Best layer | AUROC | F1 |
-|---|---|---|---|---|
-| Single-turn classifier (1494 campioni) | Single-turn | 30 (test) / 13 (CV) | 0.831 | 0.463 |
-| Mixed classifier (1494 single + 600 multi) | Mixed | 23 | 0.961 | 0.907 |
-| Mixed classifier | Single-turn | 23 | 0.827 | 0.500 |
+Due famiglie di valutazione, sempre su test set held-out:
+1. **Colonna merged**: test su distribuzione mista, training su single / multi / merged.
+2. **Matrice di generalizzazione cross-distribution 2×2**: incrocia i due regimi
+   (single-turn, multi-turn) in addestramento e valutazione. Diagonale =
+   in-distribution; fuori diagonale = transfer.
 
-**Finding principale**: AUROC ~0.83 è il segnale genuino di allucinazione nel
-residual stream, indipendente dal training set. Layer 23 è il layer ottimale
-stabile attraverso esperimenti e distribuzioni di dati diverse.
+### Risultati finali — matrice 2×2 (AUROC del best layer)
 
-Il mixed classifier su test mixed (0.96) è inflazionato da un confound
-strutturale (single-turn vs multi-turn ha distribuzione di label opposta). Il
-risultato scientifico rilevante è AUROC 0.83 su test single-turn.
+| Train → Test | Tipo | Qwen (best layer) | Llama (best layer) |
+|---|---|---|---|
+| single → single | in-dist | **0.82** (L19) | **0.86** (L15) |
+| multi → multi | in-dist | **0.93** (L13) | **0.77** (L20) |
+| single → multi | transfer | 0.61 (L10) | 0.61 (L0) |
+| multi → single | transfer | 0.72 (L13) | 0.67 (L2) |
 
-### Risultati Llama (preliminari, in revisione)
+### Risultati finali — colonna merged (test = merged)
 
-Le prime esecuzioni Llama sono state condotte **senza** `--use_native_tools` e
-hanno prodotto hallucination rate ~54% su single-turn, parzialmente inflazionato
-da fallimenti di parsing del formato non-nativo. Il fix è stato applicato in
-codice (commit `6f59bd6`) e le ri-esecuzioni con template nativo sono in corso.
-I valori target attesi sono ~20–30% hallucination rate single-turn, in linea
-con Qwen.
+| Train | Qwen | Llama |
+|---|---|---|
+| single | 0.92 | 0.85 |
+| multi | 0.92 | 0.69 |
+| merged | 0.94 | 0.87 |
+
+**Finding principale (cross-model)**: il segnale di allucinazione nel residual
+stream è **rilevabile ma specifico della distribuzione**, non universale. Esiste
+in-distribution in ciascun regime (AUROC 0.82–0.93, a profondità intermedia,
+layer 15–20), ma **non generalizza** tra regimi (transfer 0.61–0.72), e nel
+transfer il best layer collassa verso layer superficiali (correlato strutturale,
+non semantico). Lo stesso pattern — diagonale forte, transfer debole, asimmetria
+multi→single > single→multi — si manifesta su **entrambi i modelli**, suggerendo
+una proprietà generale e non una peculiarità di un singolo modello.
+
+**Confound del merged**: l'AUROC alto sul test merged (fino a 0.94) è in parte
+inflazionato da un confound strutturale (il test mescola due regimi a
+distribuzione di classe opposta). L'effetto è forte in Qwen (gap di hallucination
+rate 11.7% vs 84.7%, prestazioni piatte e indifferenti al training set) e debole
+in Llama (gap 28.6% vs 76.5%). Per questo la misura non contaminata è la matrice
+2×2 per-regime, non il merged.
 
 ---
 
@@ -154,16 +170,24 @@ mcpsuite/
 │   │                               `--total`/`--weights`
 │   │                             • `metrics.json` include il campo `"model"`
 │   ├── evaluator.py            ← valutazione deterministica AST
-│   │                             • parser step 1b per il formato
-│   │                               `<function_name>{json}</function_name>` di Llama
-│   │                               (gestisce nomi puntati come `game_rewards.get`)
-│   ├── test_evaluator.py       ← 32 test unitari (include 7 Llama-format)
+│   │                             • parser step 1b: `<function_name>{json}</function_name>`
+│   │                               di Llama (nomi puntati come `game_rewards.get`)
+│   │                             • parser step 2b: parallel Llama `{...}; {...}`
+│   │                             • evaluate_multi_turn(aggregation_threshold)
+│   │                               strategia B2 (label=1 se frac_failed ≥ soglia)
+│   ├── reevaluate.py           ← ri-etichetta un dataset esistente con l'evaluator
+│   │                             attuale, SENZA rifare l'inferenza (rigenera
+│   │                             labeled_dataset/splits/metrics/activations y.npy)
+│   │                             • flag `--multi_turn_threshold` (strategia B2)
+│   ├── multi_turn_strategy_preview.py ← confronto strategie di aggregazione
+│   │                             multi-turn (any / majority / threshold / ...)
+│   ├── test_evaluator.py       ← 32 test unitari (include Llama-format)
 │   └── test_sampler.py         ← 10 test unitari (proportional + exact_sample)
 ├── outputs/
 │   ├── single_turn/            ← Qwen, 1000 campioni standard
 │   ├── single_turn2/           ← Qwen, 494 campioni live
 │   ├── single_turn_merged/     ← Qwen, 1494 campioni merge dei due (11.7% halluc)
-│   ├── multi_turn/             ← Qwen, 600 campioni multi-turn (~99% halluc)
+│   ├── multi_turn/             ← Qwen, 600 campioni multi-turn (84.7% halluc, B2 0.7)
 │   └── llama/                  ← Llama, esperimenti multi-modello
 │       └── llama/
 │           ├── standard/         ← single-turn standard
@@ -183,8 +207,15 @@ mcpsuite/
 │   └── plot_comparison.py      ← confronto AUROC+Accuracy tra due esperimenti
 │                                 (gestisce sia formato lista che dict)
 ├── phase4/
-│   └── eval.py                 ← valutazione test set: AUROC, F1, bootstrap CI,
-│                                  soglia Youden, breakdown per categoria, plot
+│   ├── eval.py                 ← valutazione test set: AUROC/AUPRC/Acc/Prec/Rec/F1
+│   │                             tutte con 95% CI bootstrap, soglia Youden,
+│   │                             majority baseline (max tra le due classi),
+│   │                             breakdown per categoria. Produce results.json +
+│   │                             summary.png + metrics_per_layer.png +
+│   │                             best_layer_detail.png (confusion matrix)
+│   └── plot_matrix.py          ← figure cross-distribution: heatmap 2×2 train×test,
+│                                  bar chart colonna merged, griglia AUROC-per-layer,
+│                                  curve AUROC sovrapposte tra modelli
 └── data/                       ← dataset BFCL scaricato da HuggingFace
 ```
 
@@ -192,27 +223,21 @@ mcpsuite/
 
 ## Datasets
 
-### Qwen
+Hallucination rate finali (post-fix parser + `--use_native_tools` + strategia
+multi-turn B2 soglia 0.7). Le tre distribuzioni esistono per entrambi i modelli:
+single-turn (1494: simple/multiple/parallel/parallel_multiple + live), multi-turn
+(600: base/miss_func/miss_param), merged (2094 = unione).
 
-| Directory | Campioni | Categorie | Halluc. rate |
+| Regime | N | Qwen | Llama |
 |---|---|---|---|
-| `outputs/single_turn/` | 1000 | simple, multiple, parallel, parallel_multiple | 8.3% |
-| `outputs/single_turn2/` | 494 | live_multiple, live_parallel, live_parallel_multiple | ~18% |
-| `outputs/single_turn_merged/` | 1494 | tutte le sopra | 11.7% |
-| `outputs/multi_turn/` | 600 | multi_turn_base, miss_func, miss_param, composite | ~99% |
+| single-turn | 1494 | 11.7% | 28.6% |
+| multi-turn (B2 0.7) | 600 | 84.7% | 76.5% |
+| merged | 2094 | 32.6% | 42.4% |
 
-### Llama (pre-fix `--use_native_tools` — in attesa di re-run)
-
-| Directory | Campioni | Halluc. rate (attuale) |
-|---|---|---|
-| `outputs/llama/llama/standard/` | 1000 | 50.0% |
-| `outputs/llama/llama/live/` | 494 | 62.5% |
-| `outputs/llama/llama/single_turn_merged/` | 1494 | 54.2% |
-| `outputs/llama/llama/multi-turn/` | 600 | 99.8% |
-| `outputs/llama/llama/merged_all/` | 2094 | 67.2% |
-
-I valori ≥50% sono influenzati dal mismatch di formato (parser fail → `NO_CALL_MADE`).
-La metrica genuina si avrà dopo il re-run con `--use_native_tools`.
+I valori Llama pre-fix (single ~54%, merged ~67%) erano inflazionati dal mismatch
+di formato (parser fail → falsi `NO_CALL_MADE`/`WRONG_CALL_COUNT`); risolti con
+`--use_native_tools` + i fix del parser. I dataset esistenti sono stati ri-etichettati
+con `reevaluate.py` senza rifare l'inferenza.
 
 ---
 
@@ -256,9 +281,12 @@ information-dense position for predicting what the model will generate next.
 AUROC vs layer index identifies the most discriminative layer. The best-layer
 classifier is the candidate for the production guardrail.
 
-**Class imbalance.** Dataset è ~8-12% hallucinations (single-turn). Use
-`pos_weight = n_neg / n_pos` con `BCELoss(reduction="none")` applicato
-manualmente per-sample. Do not oversample.
+**Class imbalance.** Lo sbilanciamento dipende dal regime: single-turn a
+maggioranza negativa (~12-29% positivi), multi-turn a maggioranza positiva
+(~76-85%), merged intermedio. Si usa `pos_weight = n_neg / n_pos` con
+`BCELoss(reduction="none")` applicato manualmente per-sample. `pos_weight` è
+calcolato **una volta sul training set** (non per batch): equalizza il contributo
+delle due classi qualunque sia la maggioritaria. Do not oversample.
 
 **Seed reproducibility.** `set_seed(seed + layer_idx)` viene applicato
 all'inizio del training di ogni layer. Allo stesso seed CLI corrisponde
@@ -269,10 +297,28 @@ di esecuzione. `StratifiedKFold(shuffle=True, random_state=seed)` per la CV.
 formano il CV pool per 5-fold StratifiedKFold. Il test set non viene mai toccato
 fino a Phase 4.
 
-**Confound multi-turn.** Il dataset multi-turn ha ~99% allucinazioni. Addestrare
-su single+multi dà AUROC artificialmente alto (~0.96) perché il classificatore
-impara la distinzione strutturale, non il segnale di allucinazione. Usare il
-test set single-turn per misurare il segnale genuino.
+**Strategia di aggregazione multi-turn (B2, soglia 0.7).** Un sample multi-turn
+ha più turni. La regola "any-turn" (label=1 se almeno un turno fallisce) satura
+con il numero di turni e gonfia la classe positiva. Si usa invece una soglia di
+maggioranza qualificata: label=1 se `frac_failed ≥ 0.7`. Riduce l'hallucination
+rate multi-turn senza scartare dati (Qwen 98.8% → 84.7%, Llama 86.7% → 76.5%).
+Parametro `aggregation_threshold` in `evaluate_multi_turn()`.
+
+**Valutazione cross-distribution (matrice 2×2).** Il segnale va misurato
+*dentro* ciascun regime (diagonale) e *tra* regimi (fuori diagonale). La
+diagonale misura se il segnale esiste; la fuori-diagonale se generalizza.
+Risultato: segnale **specifico della distribuzione** (transfer 0.61-0.72 ≪
+in-distribution 0.82-0.93), confermato su entrambi i modelli.
+
+**Confound del test merged.** Valutare su test merged dà AUROC alto ma
+parzialmente spurio: il test mescola single-turn (poche allucinazioni) e
+multi-turn (molte), quindi un classificatore può distinguere il *regime* anziché
+l'allucinazione. La forza del confound scala col divario di hallucination rate
+tra i regimi (forte in Qwen, debole in Llama). La misura pulita è la matrice 2×2.
+
+**Majority baseline.** L'accuracy va sempre confrontata con la baseline della
+classe maggioritaria, calcolata come `max(frac_neg, frac_pos)` — non come
+`frac_neg`, che sarebbe errato sui test a maggioranza positiva (multi-turn).
 
 **Live categories — fix system message.** Le categorie live (live_multiple,
 live_parallel, live_parallel_multiple) incorporano un system message nei turni
@@ -374,6 +420,24 @@ cd phase4 && python eval.py \
     --classifiers_dir ../phase3/classifiers_single \
     --out_dir         eval_results_single \
     --layer           23
+
+# Ri-etichetta un dataset esistente senza rifare l'inferenza (es. dopo un fix
+# del parser o per applicare la strategia multi-turn B2)
+cd phase1e2 && python reevaluate.py \
+    --exp_dir ../outputs/multi_turn \
+    --multi_turn_threshold 0.7        # opzionale: strategia B2 (default = any-turn)
+
+# Valutazione cross-distribution: stesso eval.py, classificatore e test set di
+# regimi diversi (qui: classifier addestrato su single, test su multi)
+cd phase4 && python eval.py \
+    --activations_dir ../outputs/multi_turn/activations \
+    --classifiers_dir ../phase3/classifiers_single \
+    --out_dir         eval_results/multi-on-single
+
+# Figure cross-distribution (heatmap 2×2, bar chart merged, griglia/curve AUROC)
+# — vedi le funzioni in phase4/plot_matrix.py (best_from_results,
+#   plot_train_test_matrix, plot_fixed_test_bars, plot_auroc_per_layer_grid,
+#   plot_auroc_curves), richiamabili dai results.json già prodotti da eval.py.
 
 # Confronto due esperimenti (es. Qwen vs Llama)
 cd phase3 && python plot_comparison.py \
