@@ -1,4 +1,5 @@
 # BFCL Hallucination Probe
+## Progetto di tesi triennale in Informatica
 
 Pipeline completa per predire — prima che venga emessa — se un LLM agente
 allucinerà durante una tool call, intercettando il residual stream di tutti i
