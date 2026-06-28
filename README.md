@@ -1,14 +1,15 @@
-# BFCL Hallucination Probe
+# Prevedere le allucinazioni nel tool calling di un agente LLM tramite l’analisi del residual stream
 ## Progetto di tesi triennale in Informatica
 
-Pipeline completa per predire — prima che venga emessa — se un LLM agente
-allucinerà durante una tool call, intercettando il residual stream di tutti i
-32 layer del transformer durante il prefill.
+### Abstract
+Abbiamo addestrato e valutato dei classificatori leggeri (MLP) sullo stato interno di Qwen3.5-9B e LLama-3.1-8B-Instruct mentre facevano inferenza su tasks di tool calling, da benchmark BFCL. Lo scopo era capire se le allucinazioni di tool calling erano possibili da prevedere. Si è dimostrato che la codifica dell’incertezza, all’interno del modello, avviene nei layer intermedi ed è quindi possibile prevedere queste allucinazioni con un sistema di protezione (guard rail) specializzato.
+
+### Cosa rappresenta questa repo
+Pipeline completa per prevedere le allucinazioni di un Agente LLM durante una tool call,
+intercettando il residual stream di tutti i layer del transformer durante il prefill.
 
 Il progetto è **multi-modello**: supporta Qwen3.5-9B e Llama-3.1-8B-Instruct
-attraverso lo stesso pipeline, con instradamento automatico al template di tool
-calling appropriato (system prompt per Qwen, `apply_chat_template(tools=)`
-nativo per Llama).
+attraverso lo stesso pipeline. Abbiamo preso due modelli per verificare che i risultati non dipendano da un singolo modello.
 
 ---
 
