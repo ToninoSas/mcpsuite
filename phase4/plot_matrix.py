@@ -272,7 +272,7 @@ def plot_train_test_matrix(
             # testo scuro/chiaro a seconda del valore (verde chiaro → testo scuro)
             text_color = "black"
             txt = (
-                f"{val:.2f} ± {delta:.2f}\n"
+                f"{val:.2f}  [{ci[1]:.2f}, {ci[0]:.2f}]\n"
                 f"layer {lay}"
             )
             tag = "in-dist" if tr == te else "transfer"
